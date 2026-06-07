@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  # PostgreSQL + PostGIS 地理数据库
+  postgis-db:
+    image: postgis/postgis:16-3.4
+    container_name: lowaltitude-postgis
+    environment:
+      POSTGRES_DB: lowaltitude_logistics
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: lowaltitude2024
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
