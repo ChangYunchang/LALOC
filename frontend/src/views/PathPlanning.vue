@@ -124,6 +124,37 @@ const mapRef = ref(null)
 const map = shallowRef(null)
 let AMap = null
 
+// ── 中键旋转 ──────────────────────────────────
+let isRotating = false
+let rotStartX = 0
+let rotStartY = 0
+let rotStartRotation = 0
+let rotStartPitch = 0
+
+function initMiddleButtonRotation(mapInstance, container) {
+  container.addEventListener('mousedown', (e) => {
+    if (e.button === 1) {
+      e.preventDefault()
+      isRotating = true
+      rotStartX = e.clientX
+      rotStartY = e.clientY
+      rotStartRotation = mapInstance.getRotation()
+      rotStartPitch = mapInstance.getPitch()
+    }
+  })
+  document.addEventListener('mousemove', (e) => {
+    if (!isRotating) return
+    mapInstance.setRotation(rotStartRotation + (e.clientX - rotStartX) * 0.3)
+    mapInstance.setPitch(Math.max(0, Math.min(75, rotStartPitch - (e.clientY - rotStartY) * 0.3)))
+  })
+  document.addEventListener('mouseup', (e) => {
+    if (e.button === 1) isRotating = false
+  })
+  container.addEventListener('auxclick', (e) => {
+    if (e.button === 1) e.preventDefault()
+  })
+}
+
 const viewMode = ref('2D')
 const startInput = ref('')
 const endInput = ref('')
@@ -169,12 +200,15 @@ onMounted(async () => {
       mapStyle: 'amap://styles/whitesmoke',
       features: ['bg', 'road', 'building', 'point'],
       buildingAnimation: true,
-      rotateEnable: true,
-      pitchEnable: true,
+      rotateEnable: false,
+      pitchEnable: false,
     })
 
     map.value.addControl(new AMap.Scale({ position: 'LB' }))
     map.value.addControl(new AMap.ToolBar({ position: 'RT', liteStyle: true }))
+
+    // 中键旋转
+    initMiddleButtonRotation(map.value, mapRef.value)
 
     // 白模建筑
     const buildings = new AMap.Buildings({

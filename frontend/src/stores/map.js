@@ -5,8 +5,11 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export const useMapStore = defineStore('map', () => {
-  // 地图实例（使用 shallowRef 避免 Vue 深度代理）
+  // 地图实例
   const map = ref(null)
+
+  // AMap 类引用（供其他组件使用）
+  let AMap = null
 
   // 地图模式：2D 或 3D
   const viewMode = ref('2D')
@@ -29,11 +32,11 @@ export const useMapStore = defineStore('map', () => {
   // 限高区多边形列表
   const heightLimitPolygons = ref([])
 
-  // 航线列表
-  const routeLines = ref([])
-
-  // 无人机模拟标记
-  const droneMarkers = ref([])
+  // 航线相关
+  const routeLines = ref([])      // 航线 Polyline
+  const routeDataList = ref([])   // 航线数据
+  const selectedRouteId = ref(null) // 当前选中的航线 ID
+  const droneMarkers = ref([])    // 无人机标记
 
   function setMap(mapInstance) {
     map.value = mapInstance
@@ -45,19 +48,25 @@ export const useMapStore = defineStore('map', () => {
 
   function clearAllOverlays() {
     if (map.value) {
-      // 清除禁飞区
       noFlyPolygons.value.forEach((p) => p.setMap(null))
       noFlyPolygons.value = []
 
-      // 清除限高区
       heightLimitPolygons.value.forEach((p) => p.setMap(null))
       heightLimitPolygons.value = []
 
-      // 清除航线
       routeLines.value.forEach((l) => l.setMap(null))
       routeLines.value = []
 
-      // 清除无人机标记
+      droneMarkers.value.forEach((m) => m.setMap(null))
+      droneMarkers.value = []
+    }
+  }
+
+  // 只清除航线和无人机（保留禁飞区/限高区）
+  function clearRouteOverlays() {
+    if (map.value) {
+      routeLines.value.forEach((l) => l.setMap(null))
+      routeLines.value = []
       droneMarkers.value.forEach((m) => m.setMap(null))
       droneMarkers.value = []
     }
@@ -65,6 +74,7 @@ export const useMapStore = defineStore('map', () => {
 
   return {
     map,
+    AMap,
     viewMode,
     loading,
     currentTime,
@@ -73,9 +83,12 @@ export const useMapStore = defineStore('map', () => {
     noFlyPolygons,
     heightLimitPolygons,
     routeLines,
+    routeDataList,
+    selectedRouteId,
     droneMarkers,
     setMap,
     toggleViewMode,
     clearAllOverlays,
+    clearRouteOverlays,
   }
 })
