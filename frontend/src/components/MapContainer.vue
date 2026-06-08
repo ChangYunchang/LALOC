@@ -293,7 +293,6 @@ function drawRoutes(routes) {
     mapStore.droneMarkers.push(droneMarker)
   })
 
-  // 启动全局单一动画循环
   startGlobalLoop()
 }
 
@@ -369,44 +368,98 @@ function stopGlobalLoop() {
 
 // ── 航线高亮 ──────────────────────────────────
 
+// 设置 Marker 透明度（兼容 content 自定义 HTML 的 Marker）
+function setMarkerOpacity(marker, opacity) {
+  if (!marker) return
+  try {
+    marker.setOpacity(opacity)
+  } catch {
+    // content 模式下 setOpacity 不可用，改为操作 DOM
+    const el = marker.getContentDom?.() || marker.getDom?.()
+    if (el) el.style.opacity = opacity
+  }
+}
+
 function highlightRoute(routeId) {
   mapStore.selectedRouteId = routeId
   const map = mapStore.map
+  if (!map || !AMap) return
 
-  Object.entries(routeAnimState).forEach(([id, state]) => {
-    const isSelected = Number(id) === routeId
-    state.polyline.setOptions({
-      strokeWeight: isSelected ? 6 : 2,
-      strokeOpacity: isSelected ? 1 : 0.2,
-      strokeColor: isSelected ? COLOR_HIGHLIGHT : COLOR_DIM,
-      zIndex: isSelected ? 150 : 80,
-    })
-    state.droneMarker.setOpacity(isSelected ? 1 : 0)
-    state.startMarker?.setOpacity(isSelected ? 1 : 0.15)
-    state.endMarker?.setOpacity(isSelected ? 1 : 0.15)
-  })
+  for (const key in routeAnimState) {
+    const state = routeAnimState[key]
+    const isSelected = Number(key) === routeId
 
-  // 自动定位
-  const state = routeAnimState[routeId]
-  if (state && map) {
-    map.setFitView([state.polyline], false, [80, 80, 80, 80])
+    // 清理旧高亮线
+    if (state._highlightLine) {
+      state._highlightLine.setMap(null)
+      state._highlightLine = null
+    }
+
+    // 隐藏原始线
+    state.polyline.hide()
+
+    if (isSelected) {
+      // 选中：创建琥珀色高亮线
+      const hlLine = new AMap.Polyline({
+        path: state.path,
+        strokeColor: COLOR_HIGHLIGHT,
+        strokeWeight: 6,
+        strokeOpacity: 1,
+        showDir: true,
+        lineJoin: 'round',
+        lineCap: 'round',
+        zIndex: 150,
+      })
+      map.add(hlLine)
+      state._highlightLine = hlLine
+
+      setMarkerOpacity(state.droneMarker, 1)
+      setMarkerOpacity(state.startMarker, 1)
+      setMarkerOpacity(state.endMarker, 1)
+    } else {
+      state.polyline.show()
+      state.polyline.setOptions({
+        strokeWeight: 3,
+        strokeOpacity: 0.6,
+        strokeColor: COLOR_NORMAL,
+        zIndex: 100,
+      })
+      setMarkerOpacity(state.droneMarker, 0.3)
+      setMarkerOpacity(state.startMarker, 0.4)
+      setMarkerOpacity(state.endMarker, 0.4)
+    }
+  }
+
+  // 定位
+  const selectedState = routeAnimState[routeId]
+  if (selectedState && map) {
+    const target = selectedState._highlightLine || selectedState.polyline
+    map.setFitView([target], false, [80, 80, 80, 80])
   }
 }
 
 function resetRouteHighlight() {
   mapStore.selectedRouteId = null
 
-  Object.values(routeAnimState).forEach((state) => {
+  for (const key in routeAnimState) {
+    const state = routeAnimState[key]
+
+    if (state._highlightLine) {
+      state._highlightLine.setMap(null)
+      state._highlightLine = null
+    }
+
+    state.polyline.show()
     state.polyline.setOptions({
       strokeWeight: 4,
       strokeOpacity: 0.8,
       strokeColor: COLOR_NORMAL,
       zIndex: 100,
     })
-    state.droneMarker.setOpacity(1)
-    state.startMarker?.setOpacity(1)
-    state.endMarker?.setOpacity(1)
-  })
+    setMarkerOpacity(state.droneMarker, 1)
+    setMarkerOpacity(state.startMarker, 1)
+    setMarkerOpacity(state.endMarker, 1)
+  }
 }
 
 // 时间轴回放：设置无人机位置 + 跟踪地图
