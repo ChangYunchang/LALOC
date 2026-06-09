@@ -114,7 +114,7 @@ for route_data in ROUTES:
     )
 
     if result["path"] and len(result["path"]) > 1:
-        # A* 规划成功，使用规划后的路径
+        # A* 规划成功，使用规划后的路径（起止点已精确修正）
         path_points = result["path"]
         total_dist = result["total_distance"]
         est_time = result["estimated_time"]
@@ -123,12 +123,24 @@ for route_data in ROUTES:
         coord_strs = [f"{p['lng']} {p['lat']}" for p in path_points]
         wkt = f"LINESTRING({', '.join(coord_strs)})"
 
-        print(f"  A* 规划成功: {len(path_points)} 个路径点, {total_dist/1000:.1f} km")
+        # 高度剖面统计
+        alt_profile = result.get("altitude_profile", [])
+        if alt_profile:
+            phases = {}
+            for p in alt_profile:
+                ph = p["phase"]
+                phases[ph] = phases.get(ph, 0) + 1
+            phase_summary = ", ".join(f"{k}:{v}" for k, v in phases.items())
+            print(f"  A* 规划成功: {len(path_points)} 个路径点, {total_dist/1000:.1f} km")
+            print(f"  高度剖面: {phase_summary}")
+        else:
+            print(f"  A* 规划成功: {len(path_points)} 个路径点, {total_dist/1000:.1f} km")
+
         if result["warnings"]:
             for w in result["warnings"]:
                 print(f"  [警告] {w}")
     else:
-        # A* 规划失败，使用直线连接
+        # A* 规划失败，使用直线连接（起止点为精确坐标）
         coord_strs = [f"{w['lng']} {w['lat']}" for w in wps]
         wkt = f"LINESTRING({', '.join(coord_strs)})"
 

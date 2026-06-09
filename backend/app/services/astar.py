@@ -295,6 +295,115 @@ def astar_search(
     return None  # 不可达
 
 
+def compute_altitude_profile(
+    db: Session,
+    path: list[tuple[float, float]],
+    cruise_alt: float = 100.0,
+    takeoff_alt: float = 0.0,
+    landing_alt: float = 30.0,
+) -> list[dict]:
+    """
+    为路径计算高度剖面，考虑限高区和建筑物高度。
+
+    高度策略：
+    - 起飞段（前 5%）：从地面爬升至巡航高度
+    - 巡航段：保持巡航高度
+    - 限高区段：降至限高区内允许的最大高度，进入前开始下降，离开后爬升
+    - 降落段（最后 5%）：从巡航高度降至降落高度
+
+    返回: [{"alt": 高度, "phase": 飞行阶段}, ...]
+    """
+    if not path or len(path) < 2:
+        return [{"alt": cruise_alt, "phase": "cruise"}] * len(path)
+
+    n = len(path)
+
+    # 查询所有限高区，获取路径可能经过的限高区信息
+    height_limit_zones = db.query(HeightLimitZone).all()
+    zone_info = []  # [(zone_id, max_altitude, geometry_wkt)]
+
+    for zone in height_limit_zones:
+        # 检查路径是否有任何点在该限高区内
+        for lng, lat in path[::max(1, n // 20)]:  # 采样检查，提高性能
+            result = db.execute(
+                text("""
+                    SELECT ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
+                    FROM height_limit_zones WHERE id = :id
+                """),
+                {"lng": lng, "lat": lat, "id": zone.id}
+            ).fetchone()
+            if result and result[0]:
+                zone_info.append({
+                    "id": zone.id,
+                    "max_altitude": zone.max_altitude,
+                })
+                break
+
+    # 对每个路径点，精确检查是否在限高区内
+    in_height_limit = [False] * n
+    min_height_limit = [cruise_alt] * n
+
+    if zone_info:
+        for i, (lng, lat) in enumerate(path):
+            for zone in zone_info:
+                result = db.execute(
+                    text("""
+                        SELECT ST_Contains(
+                            (SELECT geometry FROM height_limit_zones WHERE id = :zid),
+                            ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)
+                        )
+                    """),
+                    {"zid": zone["id"], "lng": lng, "lat": lat}
+                ).fetchone()
+                if result and result[0]:
+                    in_height_limit[i] = True
+                    min_height_limit[i] = min(min_height_limit[i], zone["max_altitude"])
+
+    # 计算高度剖面
+    profile = []
+    # 起飞/降落段最少 3 个点，占路径比例 5%~15%（路径越短比例越大）
+    min_phase_points = 3
+    takeoff_pct = max(0.05, min(0.15, min_phase_points / max(n, 1)))
+    landing_pct = max(0.05, min(0.15, min_phase_points / max(n, 1)))
+    takeoff_end = max(1, int(n * takeoff_pct))    # 起飞段结束索引
+    landing_start = max(takeoff_end + 1, min(n - 2, n - int(n * landing_pct)))  # 降落段开始索引
+
+    for i in range(n):
+        if i <= takeoff_end:
+            # 起飞爬升段
+            t = i / takeoff_end
+            alt = takeoff_alt + (cruise_alt - takeoff_alt) * t
+            phase = "ascent"
+        elif i >= landing_start:
+            # 降落下降段
+            t = (i - landing_start) / max(1, (n - 1 - landing_start))
+            alt = cruise_alt + (landing_alt - cruise_alt) * t
+            phase = "descent"
+        elif in_height_limit[i]:
+            # 限高区段
+            target_alt = min(cruise_alt, min_height_limit[i])
+            # 平滑过渡到限高高度
+            alt = target_alt
+            phase = "height_limit"
+        else:
+            # 巡航段
+            alt = cruise_alt
+            phase = "cruise"
+
+        profile.append({"alt": round(alt, 1), "phase": phase})
+
+    # 平滑处理：避免高度突变（限高区进入/退出的过渡）
+    for i in range(1, n - 1):
+        if profile[i]["phase"] == "height_limit" and profile[i - 1]["phase"] == "cruise":
+            # 进入限高区：开始下降
+            profile[i]["phase"] = "descent"
+        elif profile[i]["phase"] == "cruise" and profile[i - 1]["phase"] == "height_limit":
+            # 离开限高区：开始爬升
+            profile[i]["phase"] = "ascent"
+
+    return profile
+
+
 def plan_path(
     db: Session,
     start_lng: float, start_lat: float,
@@ -364,6 +473,11 @@ def plan_path(
             else:
                 full_path.extend(segment_path)
 
+    # 修复起止点偏移：确保路径首尾点为精确的起止坐标
+    if full_path:
+        full_path[0] = (start_lng, start_lat)
+        full_path[-1] = (end_lng, end_lat)
+
     # 计算总距离和时间
     total_distance = 0
     for i in range(len(full_path) - 1):
@@ -381,11 +495,18 @@ def plan_path(
     drone_speed = 15.0  # 默认速度
     estimated_time = total_distance / drone_speed
 
+    # 计算高度剖面（考虑限高区和建筑物高度）
+    altitude_profile = compute_altitude_profile(db, full_path)
+
     return {
-        "path": [{"lng": p[0], "lat": p[1], "alt": 100} for p in full_path],
+        "path": [
+            {"lng": p[0], "lat": p[1], "alt": altitude_profile[i]["alt"], "phase": altitude_profile[i]["phase"]}
+            for i, p in enumerate(full_path)
+        ],
         "total_distance": round(total_distance, 2),
         "estimated_time": round(estimated_time, 2),
         "segments": [],
         "warnings": warnings,
         "is_feasible": is_feasible,
+        "altitude_profile": altitude_profile,
     }

@@ -103,9 +103,16 @@
 
       <!-- 图例 - 右下角 -->
       <div class="planning-legend">
+        <div class="legend-group-title">区域</div>
         <div class="legend-item"><span class="lc" style="background:rgba(252,165,165,0.5);border-color:#dc2626;"></span>禁飞区</div>
         <div class="legend-item"><span class="lc" style="background:rgba(253,186,116,0.4);border-color:#ea580c;"></span>限高区</div>
-        <div class="legend-item"><span class="ll" style="background:#2563eb;"></span>规划路径</div>
+        <div class="legend-divider"></div>
+        <div class="legend-group-title">飞行阶段</div>
+        <div class="legend-item"><span class="ll" style="background:#22c55e;"></span>爬升段</div>
+        <div class="legend-item"><span class="ll" style="background:#3b82f6;"></span>巡航段</div>
+        <div class="legend-item"><span class="ll" style="background:#f59e0b;"></span>下降段</div>
+        <div class="legend-item"><span class="ll" style="background:#ef4444;"></span>限高区飞行</div>
+        <div class="legend-divider"></div>
         <div class="legend-item"><span class="ld" style="background:#16a34a;"></span>起点</div>
         <div class="legend-item"><span class="ld" style="background:#dc2626;"></span>终点</div>
       </div>
@@ -174,16 +181,25 @@ const planResult = ref(null)
 
 let startMarker = null
 let endMarker = null
-let routeLine = null
+let routeLines = []  // 分段 Polyline 数组
 let noFlyPolygons = []
 let heightLimitPolygons = []
 let buildingsLayer = null
+
+// 飞行阶段颜色映射
+const PHASE_COLORS = {
+  ascent: '#22c55e',        // 绿色 - 爬升
+  cruise: '#3b82f6',        // 蓝色 - 巡航
+  descent: '#f59e0b',       // 琥珀色 - 下降
+  height_limit: '#ef4444',  // 红色 - 限高区飞行
+}
 
 const amapKey = import.meta.env.VITE_AMAP_KEY
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE
 
 // ── 保存规划状态（地图重建后恢复）──────────────────
 let lastPlanPath = null
+let lastAltProfile = null
 
 // ── 创建地图实例 ──────────────────────────────────
 function createMapInstance(mode) {
@@ -229,10 +245,14 @@ function createMapInstance(mode) {
   // 加载禁飞区/限高区
   loadZones()
 
-  // 恢复起终点标记和路径
-  if (startPoint.value) updateStartMarker(startPoint.value)
-  if (endPoint.value) updateEndMarker(endPoint.value)
-  if (lastPlanPath) drawRoute(lastPlanPath)
+  // 恢复路径（drawRoute 会同时处理起终点标记）
+  if (lastPlanPath) {
+    drawRoute(lastPlanPath, lastAltProfile)
+  } else {
+    // 没有路径时，仅显示起终点标记
+    if (startPoint.value) updateStartMarker(startPoint.value)
+    if (endPoint.value) updateEndMarker(endPoint.value)
+  }
 }
 
 onMounted(async () => {
@@ -332,7 +352,8 @@ function switchMode(mode) {
   // 清除引用
   startMarker = null
   endMarker = null
-  routeLine = null
+  routeLines.forEach(line => { try { line.setMap(null) } catch {} })
+  routeLines = []
   noFlyPolygons = []
   heightLimitPolygons = []
 
@@ -411,27 +432,109 @@ async function doPlan() {
       consider_weather: considerWeather.value,
     })
     planResult.value = result
-    drawRoute(result.path)
+    drawRoute(result.path, result.altitude_profile)
     ElMessage.success('路径规划完成')
   } catch (e) {
     ElMessage.error('路径规划失败: ' + (e.message || '未知错误'))
   } finally { planning.value = false }
 }
 
-function drawRoute(pathPoints) {
+function drawRoute(pathPoints, altitudeProfile) {
   if (!mapInstance || !AMap || !pathPoints?.length) return
-  if (routeLine) mapInstance.remove(routeLine)
+
+  // 清除旧的分段线和标记
+  routeLines.forEach(line => mapInstance.remove(line))
+  routeLines = []
+  if (startMarker) { mapInstance.remove(startMarker); startMarker = null }
+  if (endMarker) { mapInstance.remove(endMarker); endMarker = null }
 
   // 保存路径数据（地图重建后恢复）
   lastPlanPath = pathPoints
+  lastAltProfile = altitudeProfile
 
-  routeLine = new AMap.Polyline({
-    path: pathPoints.map(p => [p.lng, p.lat]),
-    strokeColor: '#2563eb', strokeWeight: 5, strokeOpacity: 0.9,
-    showDir: true, lineJoin: 'round', lineCap: 'round', zIndex: 100,
+  // 获取路径的精确首尾坐标
+  const pathStart = pathPoints[0]
+  const pathEnd = pathPoints[pathPoints.length - 1]
+
+  // 更新起止点数据
+  startPoint.value = { lng: pathStart.lng, lat: pathStart.lat }
+  endPoint.value = { lng: pathEnd.lng, lat: pathEnd.lat }
+  startInput.value = `${pathStart.lng.toFixed(6)}, ${pathStart.lat.toFixed(6)}`
+  endInput.value = `${pathEnd.lng.toFixed(6)}, ${pathEnd.lat.toFixed(6)}`
+
+  // 创建起点标记（使用路径首点的精确坐标）
+  startMarker = new AMap.Marker({
+    position: new AMap.LngLat(pathStart.lng, pathStart.lat),
+    content: '<div style="width:14px;height:14px;background:#16a34a;border-radius:50%;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.3);transform:translate(-50%,-50%);"></div>',
+    zIndex: 200,
   })
-  mapInstance.add(routeLine)
-  mapInstance.setFitView([routeLine, startMarker, endMarker].filter(Boolean))
+  mapInstance.add(startMarker)
+
+  // 创建终点标记（使用路径尾点的精确坐标）
+  endMarker = new AMap.Marker({
+    position: new AMap.LngLat(pathEnd.lng, pathEnd.lat),
+    content: '<div style="width:14px;height:14px;background:#dc2626;border-radius:50%;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.3);transform:translate(-50%,-50%);"></div>',
+    zIndex: 200,
+  })
+  mapInstance.add(endMarker)
+
+  // 绘制路径
+  if (!altitudeProfile || altitudeProfile.length !== pathPoints.length) {
+    // 无高度剖面数据时，使用单色渲染
+    const line = new AMap.Polyline({
+      path: pathPoints.map(p => [p.lng, p.lat]),
+      strokeColor: '#3b82f6', strokeWeight: 5, strokeOpacity: 0.9,
+      showDir: true, lineJoin: 'round', lineCap: 'round', zIndex: 100,
+    })
+    mapInstance.add(line)
+    routeLines.push(line)
+  } else {
+    // 按飞行阶段分段渲染
+    // 找出 phase 变化的分界点
+    const boundaries = [0]
+    for (let i = 1; i < pathPoints.length; i++) {
+      if (altitudeProfile[i].phase !== altitudeProfile[i - 1].phase) {
+        boundaries.push(i)
+      }
+    }
+
+    // 构建分段
+    // 每段从 boundaries[b] 到 boundaries[b+1]（包含 boundaries[b+1]，共享端点）
+    // 最后一段从 boundaries[last] 到 pathPoints.length - 1
+    const segments = []
+    for (let b = 0; b < boundaries.length; b++) {
+      const startIdx = boundaries[b]
+      const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : pathPoints.length - 1
+      const phase = altitudeProfile[startIdx].phase
+      const color = PHASE_COLORS[phase] || '#3b82f6'
+      segments.push({ start: startIdx, end: endIdx, color, isLast: b === boundaries.length - 1 })
+    }
+
+    // 渲染每段 Polyline
+    // 如果某段只有一个点（start === end），跳过它（它会被包含在前一段中）
+    // 前一段的 endIdx 已经包含了当前段的 startIdx
+    for (let s = 0; s < segments.length; s++) {
+      const seg = segments[s]
+      const segPoints = pathPoints.slice(seg.start, seg.end + 1).map(p => [p.lng, p.lat])
+
+      if (segPoints.length >= 2) {
+        const line = new AMap.Polyline({
+          path: segPoints,
+          strokeColor: seg.color,
+          strokeWeight: 5,
+          strokeOpacity: 0.9,
+          showDir: seg.isLast,
+          lineJoin: 'round',
+          lineCap: 'round',
+          zIndex: 100,
+        })
+        mapInstance.add(line)
+        routeLines.push(line)
+      }
+    }
+  }
+
+  mapInstance.setFitView([...routeLines, startMarker, endMarker].filter(Boolean))
 }
 
 function formatTime(s) {
@@ -502,6 +605,8 @@ function formatTime(s) {
 }
 .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px; color: #374151; }
 .legend-item:last-child { margin-bottom: 0; }
+.legend-group-title { font-size: 11px; font-weight: 600; color: #6b7280; margin-bottom: 4px; }
+.legend-divider { height: 1px; background: #e5e7eb; margin: 6px 0; }
 .lc { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; }
 .ll { width: 18px; height: 3px; border-radius: 2px; }
 .ld { width: 10px; height: 10px; border-radius: 50%; margin: 0 4px; }

@@ -11,10 +11,25 @@
       <span>限高区</span>
       <span class="legend-count">{{ zoneStore.stats.height_limit_zones_count }}</span>
     </div>
+    <div class="legend-divider"></div>
+    <div class="legend-group-title">飞行阶段</div>
     <div class="legend-item">
-      <span class="legend-line" style="background: #2563eb;"></span>
-      <span>航线</span>
+      <span class="legend-line" style="background: #22c55e;"></span>
+      <span>爬升段</span>
     </div>
+    <div class="legend-item">
+      <span class="legend-line" style="background: #3b82f6;"></span>
+      <span>巡航段</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-line" style="background: #f59e0b;"></span>
+      <span>下降段</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-line" style="background: #ef4444;"></span>
+      <span>限高区飞行</span>
+    </div>
+    <div class="legend-divider"></div>
     <div class="legend-item">
       <span class="legend-dot" style="background: #16a34a;"></span>
       <span>无人机</span>
@@ -58,6 +73,19 @@ const zoneStore = useZoneStore()
 
 .legend-item:last-child {
   margin-bottom: 0;
+}
+
+.legend-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.legend-divider {
+  height: 1px;
+  background: #e5e7eb;
+  margin: 6px 0;
 }
 
 .legend-color {

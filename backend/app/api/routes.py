@@ -5,7 +5,11 @@ from sqlalchemy import text
 from app.database import get_db
 from app.models.routes import Route as RouteModel
 from app.schemas.routes import RouteCreate, RouteResponse
+from app.services.astar import compute_altitude_profile
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/routes", tags=["航线管理"])
 
@@ -26,6 +30,18 @@ def get_all_routes(db: Session = Depends(get_db)):
         else:
             line_json = None
 
+        # 计算高度剖面
+        altitude_profile = None
+        if line_json and line_json.get("coordinates"):
+            coords = line_json["coordinates"]
+            path = [(c[0], c[1]) for c in coords]
+            try:
+                altitude_profile = compute_altitude_profile(db, path)
+                logger.info(f"Route {route.id}: altitude_profile computed, {len(altitude_profile)} points")
+            except Exception as e:
+                logger.error(f"Route {route.id}: compute_altitude_profile failed: {e}")
+                altitude_profile = None
+
         result.append({
             "id": route.id,
             "name": route.name,
@@ -34,6 +50,7 @@ def get_all_routes(db: Session = Depends(get_db)):
             "total_distance": route.total_distance,
             "estimated_time": route.estimated_time,
             "status": route.status,
+            "altitude_profile": altitude_profile,
             "created_at": route.created_at.isoformat() if route.created_at else None,
         })
     return result
@@ -55,6 +72,16 @@ def get_route(route_id: int, db: Session = Depends(get_db)):
     else:
         line_json = None
 
+    # 计算高度剖面
+    altitude_profile = None
+    if line_json and line_json.get("coordinates"):
+        coords = line_json["coordinates"]
+        path = [(c[0], c[1]) for c in coords]
+        try:
+            altitude_profile = compute_altitude_profile(db, path)
+        except Exception:
+            altitude_profile = None
+
     return {
         "id": route.id,
         "name": route.name,
@@ -63,6 +90,7 @@ def get_route(route_id: int, db: Session = Depends(get_db)):
         "total_distance": route.total_distance,
         "estimated_time": route.estimated_time,
         "status": route.status,
+        "altitude_profile": altitude_profile,
         "created_at": route.created_at.isoformat() if route.created_at else None,
     }
 

@@ -244,9 +244,25 @@ function switchMode(mode) {
 const routeAnimState = {}
 
 // 颜色常量
-const COLOR_NORMAL = '#10b981'    // 绿色 - 普通航线
+const COLOR_NORMAL = '#10b981'    // 绿色 - 普通航线（无高度剖面时的默认色）
 const COLOR_HIGHLIGHT = '#f59e0b' // 琥珀色 - 选中航线
 const COLOR_DIM = '#d1d5db'       // 灰色 - 未选中
+
+// 飞行阶段颜色映射
+const PHASE_COLORS = {
+  ascent: '#22c55e',        // 绿色 - 爬升
+  cruise: '#3b82f6',        // 蓝色 - 巡航
+  descent: '#f59e0b',       // 琥珀色 - 下降
+  height_limit: '#ef4444',  // 红色 - 限高区飞行
+}
+
+// 高亮时的阶段颜色（更亮）
+const PHASE_COLORS_HIGHLIGHT = {
+  ascent: '#4ade80',
+  cruise: '#60a5fa',
+  descent: '#fbbf24',
+  height_limit: '#f87171',
+}
 
 function drawRoutes(routes) {
   const map = mapStore.map
@@ -258,7 +274,12 @@ function drawRoutes(routes) {
   // 清除旧数据
   stopGlobalLoop()
   Object.values(routeAnimState).forEach((s) => {
-    s.polyline?.setMap(null)
+    // 清除所有分段 Polyline
+    if (s.polylines) {
+      s.polylines.forEach(p => p?.setMap(null))
+    } else {
+      s.polyline?.setMap(null)
+    }
     s.droneMarker?.setMap(null)
     s.startMarker?.setMap(null)
     s.endMarker?.setMap(null)
@@ -271,20 +292,72 @@ function drawRoutes(routes) {
     if (!route.route_line?.coordinates) return
 
     const path = route.route_line.coordinates.map((c) => new AMap.LngLat(c[0], c[1]))
+    const altProfile = route.altitude_profile
 
-    // 航线 Polyline
-    const polyline = new AMap.Polyline({
-      path,
-      strokeColor: COLOR_NORMAL,
-      strokeWeight: 4,
-      strokeOpacity: 0.8,
-      showDir: true,
-      lineJoin: 'round',
-      lineCap: 'round',
-      zIndex: 100,
-    })
-    map.add(polyline)
-    mapStore.routeLines.push(polyline)
+    // 航线 Polyline（分段渲染）
+    const polylines = []
+
+    if (altProfile && altProfile.length === path.length) {
+      // 按飞行阶段分段渲染
+      // 找出 phase 变化的分界点
+      const boundaries = [0]
+      for (let i = 1; i < path.length; i++) {
+        if (altProfile[i].phase !== altProfile[i - 1].phase) {
+          boundaries.push(i)
+        }
+      }
+
+      // 构建分段
+      // 每段从 boundaries[b] 到 boundaries[b+1]（包含 boundaries[b+1]，共享端点）
+      // 最后一段从 boundaries[last] 到 path.length - 1
+      const segments = []
+      for (let b = 0; b < boundaries.length; b++) {
+        const startIdx = boundaries[b]
+        const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : path.length - 1
+        const phase = altProfile[startIdx].phase
+        const color = PHASE_COLORS[phase] || COLOR_NORMAL
+        segments.push({ start: startIdx, end: endIdx, color, isLast: b === boundaries.length - 1 })
+      }
+
+      // 渲染每段 Polyline
+      // 如果某段只有一个点（start === end），跳过它（它会被包含在前一段中）
+      // 前一段的 endIdx 已经包含了当前段的 startIdx
+      for (let s = 0; s < segments.length; s++) {
+        const seg = segments[s]
+        const segPoints = path.slice(seg.start, seg.end + 1)
+
+        if (segPoints.length >= 2) {
+          const polyline = new AMap.Polyline({
+            path: segPoints,
+            strokeColor: seg.color,
+            strokeWeight: 4,
+            strokeOpacity: 0.8,
+            showDir: seg.isLast, // 只在最后一段显示方向箭头
+            lineJoin: 'round',
+            lineCap: 'round',
+            zIndex: 100,
+          })
+          map.add(polyline)
+          polylines.push(polyline)
+        }
+      }
+    } else {
+      // 无高度剖面数据时，使用单色渲染
+      const polyline = new AMap.Polyline({
+        path,
+        strokeColor: COLOR_NORMAL,
+        strokeWeight: 4,
+        strokeOpacity: 0.8,
+        showDir: true,
+        lineJoin: 'round',
+        lineCap: 'round',
+        zIndex: 100,
+      })
+      map.add(polyline)
+      polylines.push(polyline)
+    }
+
+    mapStore.routeLines.push(...polylines)
 
     // 起点（圆点标记）
     const startMarker = new AMap.Marker({
@@ -314,7 +387,8 @@ function drawRoutes(routes) {
     map.add(droneMarker)
 
     routeAnimState[route.id] = {
-      polyline,
+      polylines,     // 多段 Polyline 数组
+      polyline: polylines[0], // 兼容旧代码（取第一段）
       droneMarker,
       startMarker,
       endMarker,
@@ -420,37 +494,96 @@ function highlightRoute(routeId) {
     const state = routeAnimState[key]
     const isSelected = Number(key) === routeId
 
-    if (state._highlightLine) {
-      state._highlightLine.setMap(null)
-      state._highlightLine = null
+    // 清除旧的高亮线
+    if (state._highlightLines) {
+      state._highlightLines.forEach(l => l?.setMap(null))
+      state._highlightLines = null
     }
 
-    state.polyline.hide()
+    const allPolys = state.polylines || [state.polyline].filter(Boolean)
+
+    // 隐藏原始分段线
+    allPolys.forEach(p => p.hide())
 
     if (isSelected) {
-      const hlLine = new AMap.Polyline({
-        path: state.path,
-        strokeColor: COLOR_HIGHLIGHT,
-        strokeWeight: 6,
-        strokeOpacity: 1,
-        showDir: true,
-        lineJoin: 'round',
-        lineCap: 'round',
-        zIndex: 150,
-      })
-      map.add(hlLine)
-      state._highlightLine = hlLine
+      // 选中：创建高亮版分段线（保持阶段颜色，增加线宽和亮度）
+      const hlLines = []
+      const altProfile = state.route?.altitude_profile
+
+      if (altProfile && altProfile.length === state.path.length) {
+        // 按阶段分段高亮
+        // 找出 phase 变化的分界点
+        const boundaries = [0]
+        for (let i = 1; i < state.path.length; i++) {
+          if (altProfile[i].phase !== altProfile[i - 1].phase) {
+            boundaries.push(i)
+          }
+        }
+
+        // 构建分段
+        // 每段从 boundaries[b] 到 boundaries[b+1]（包含 boundaries[b+1]，共享端点）
+        // 最后一段从 boundaries[last] 到 state.path.length - 1
+        const segments = []
+        for (let b = 0; b < boundaries.length; b++) {
+          const startIdx = boundaries[b]
+          const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : state.path.length - 1
+          const phase = altProfile[startIdx].phase
+          const color = PHASE_COLORS_HIGHLIGHT[phase] || COLOR_HIGHLIGHT
+          segments.push({ start: startIdx, end: endIdx, color, isLast: b === boundaries.length - 1 })
+        }
+
+        // 渲染每段高亮线
+        // 如果某段只有一个点（start === end），跳过它（它会被包含在前一段中）
+        // 前一段的 endIdx 已经包含了当前段的 startIdx
+        for (let s = 0; s < segments.length; s++) {
+          const seg = segments[s]
+          const segPoints = state.path.slice(seg.start, seg.end + 1)
+
+          if (segPoints.length >= 2) {
+            const hlLine = new AMap.Polyline({
+              path: segPoints,
+              strokeColor: seg.color,
+              strokeWeight: 6,
+              strokeOpacity: 1,
+              showDir: seg.isLast, // 只在最后一段显示方向箭头
+              lineJoin: 'round',
+              lineCap: 'round',
+              zIndex: 150,
+            })
+            map.add(hlLine)
+            hlLines.push(hlLine)
+          }
+        }
+      } else {
+        // 无高度剖面，使用单色高亮
+        const hlLine = new AMap.Polyline({
+          path: state.path,
+          strokeColor: COLOR_HIGHLIGHT,
+          strokeWeight: 6,
+          strokeOpacity: 1,
+          showDir: true,
+          lineJoin: 'round',
+          lineCap: 'round',
+          zIndex: 150,
+        })
+        map.add(hlLine)
+        hlLines.push(hlLine)
+      }
+
+      state._highlightLines = hlLines
 
       setMarkerOpacity(state.droneMarker, 1)
       setMarkerOpacity(state.startMarker, 1)
       setMarkerOpacity(state.endMarker, 1)
     } else {
-      state.polyline.show()
-      state.polyline.setOptions({
-        strokeWeight: 3,
-        strokeOpacity: 0.6,
-        strokeColor: COLOR_NORMAL,
-        zIndex: 100,
+      // 未选中：降低透明度
+      allPolys.forEach(p => {
+        p.show()
+        p.setOptions({
+          strokeWeight: 3,
+          strokeOpacity: 0.6,
+          zIndex: 100,
+        })
       })
       setMarkerOpacity(state.droneMarker, 0.3)
       setMarkerOpacity(state.startMarker, 0.4)
@@ -460,8 +593,8 @@ function highlightRoute(routeId) {
 
   const selectedState = routeAnimState[routeId]
   if (selectedState && map) {
-    const target = selectedState._highlightLine || selectedState.polyline
-    map.setFitView([target], false, [80, 80, 80, 80])
+    const targets = selectedState._highlightLines || [selectedState.polyline].filter(Boolean)
+    map.setFitView(targets, false, [80, 80, 80, 80])
   }
 }
 
@@ -471,17 +604,21 @@ function resetRouteHighlight() {
   for (const key in routeAnimState) {
     const state = routeAnimState[key]
 
-    if (state._highlightLine) {
-      state._highlightLine.setMap(null)
-      state._highlightLine = null
+    // 清除高亮线
+    if (state._highlightLines) {
+      state._highlightLines.forEach(l => l?.setMap(null))
+      state._highlightLines = null
     }
 
-    state.polyline.show()
-    state.polyline.setOptions({
-      strokeWeight: 4,
-      strokeOpacity: 0.8,
-      strokeColor: COLOR_NORMAL,
-      zIndex: 100,
+    // 恢复原始分段线样式
+    const allPolys = state.polylines || [state.polyline].filter(Boolean)
+    allPolys.forEach(p => {
+      p.show()
+      p.setOptions({
+        strokeWeight: 4,
+        strokeOpacity: 0.8,
+        zIndex: 100,
+      })
     })
     setMarkerOpacity(state.droneMarker, 1)
     setMarkerOpacity(state.startMarker, 1)
