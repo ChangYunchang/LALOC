@@ -45,28 +45,36 @@ let buildingsLayer = null
 const amapKey = import.meta.env.VITE_AMAP_KEY
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE
 
-// ── 中键旋转 ──────────────────────────────────
+// 保存航线数据，用于地图重建后重绘
+let lastRoutesData = null
+
+// ── 中键旋转（使用 mapStore.map 获取当前地图实例）────
 let isRotating = false
 let startX = 0
 let startY = 0
 let startRotation = 0
 let startPitch = 0
 
-function initMiddleButtonRotation(map, container) {
+function initMiddleButtonRotation(container) {
   container.addEventListener('mousedown', (e) => {
     if (e.button === 1) {
       e.preventDefault()
       isRotating = true
       startX = e.clientX
       startY = e.clientY
-      startRotation = map.getRotation()
-      startPitch = map.getPitch()
+      const m = mapStore.map
+      if (m) {
+        startRotation = m.getRotation()
+        startPitch = m.getPitch()
+      }
     }
   })
   document.addEventListener('mousemove', (e) => {
     if (!isRotating) return
-    map.setRotation(startRotation + (e.clientX - startX) * 0.3)
-    map.setPitch(Math.max(0, Math.min(75, startPitch - (e.clientY - startY) * 0.3)))
+    const m = mapStore.map
+    if (!m) return
+    m.setRotation(startRotation + (e.clientX - startX) * 0.3)
+    m.setPitch(Math.max(0, Math.min(75, startPitch - (e.clientY - startY) * 0.3)))
   })
   document.addEventListener('mouseup', (e) => {
     if (e.button === 1) isRotating = false
@@ -76,35 +84,27 @@ function initMiddleButtonRotation(map, container) {
   })
 }
 
-onMounted(async () => {
-  window._AMapSecurityConfig = { securityJsCode: amapSecurityCode }
-  try {
-    AMap = await AMapLoader.load({
-      key: amapKey,
-      version: '2.0',
-      plugins: ['AMap.Scale', 'AMap.ToolBar', 'AMap.Weather', 'AMap.GeometryUtil'],
-    })
+// ── 创建地图实例 ──────────────────────────────────
+function createMap(mode) {
+  const map = new AMap.Map('map-container', {
+    viewMode: mode === '3D' ? '3D' : '2D',
+    pitch: mode === '3D' ? 55 : 0,
+    rotation: mode === '3D' ? -30 : 0,
+    zoom: mode === '3D' ? 14.5 : 12,
+    center: [113.2644, 23.1291],
+    mapStyle: 'amap://styles/whitesmoke',
+    features: mode === '3D' ? ['bg', 'road', 'building', 'point'] : ['bg', 'road', 'point'],
+    buildingAnimation: false,
+    rotateEnable: mode === '3D',
+    pitchEnable: mode === '3D',
+    jogEnable: true,
+    animateEnable: true,
+  })
 
-    // 默认以 3D 模式初始化（支持旋转/俯仰），但视角设为俯视（看起来像 2D）
-    const map = new AMap.Map('map-container', {
-      viewMode: '3D',
-      pitch: 0,
-      rotation: 0,
-      zoom: 12,
-      center: [113.2644, 23.1291],
-      mapStyle: 'amap://styles/whitesmoke',
-      features: ['bg', 'road', 'building', 'point'],
-      buildingAnimation: false,
-      rotateEnable: false,
-      pitchEnable: false,
-      jogEnable: true,
-      animateEnable: true,
-    })
+  map.addControl(new AMap.Scale({ position: 'LB' }))
 
-    map.addControl(new AMap.Scale({ position: 'LB' }))
-    map.addControl(new AMap.ToolBar({ position: 'RT', liteStyle: true }))
-
-    // 3D 建筑图层（默认隐藏，切换到 3D 时显示）
+  // 3D 建筑图层（仅 3D 模式下创建）
+  if (mode === '3D') {
     buildingsLayer = new AMap.Buildings({
       zooms: [14, 20],
       heightFactor: 1.5,
@@ -114,16 +114,36 @@ onMounted(async () => {
       borderWeight: 1,
     })
     map.add(buildingsLayer)
-    buildingsLayer.hide()
+  } else {
+    buildingsLayer = null
+  }
 
-    sharedInfoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -10), autoMove: false })
+  sharedInfoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -10), autoMove: false })
 
-    mapStore.setMap(map)
-    mapStore.AMap = AMap
-    initMiddleButtonRotation(map, mapRef.value)
+  mapStore.setMap(map)
+  mapStore.AMap = AMap
+
+  // 重新渲染区域
+  renderZones()
+
+  // 重新绘制航线
+  if (lastRoutesData) {
+    drawRoutes(lastRoutesData)
+  }
+}
+
+onMounted(async () => {
+  window._AMapSecurityConfig = { securityJsCode: amapSecurityCode }
+  try {
+    AMap = await AMapLoader.load({
+      key: amapKey,
+      version: '2.0',
+      plugins: ['AMap.Scale', 'AMap.Weather', 'AMap.GeometryUtil'],
+    })
 
     await zoneStore.fetchAll()
-    renderZones()
+    createMap('2D')
+    initMiddleButtonRotation(mapRef.value)
   } catch (e) {
     console.error('地图加载失败:', e)
   }
@@ -199,24 +219,24 @@ function renderZones() {
 }
 
 function switchMode(mode) {
+  if (viewMode.value === mode) return
   viewMode.value = mode
-  const map = mapStore.map
-  if (!map) return
-  if (mode === '3D') {
-    // 启用旋转和俯仰
-    map.setStatus({ rotateEnable: true, pitchEnable: true })
-    map.setPitch(55)
-    map.setRotation(-30)
-    map.setZoomAndCenter(14.5, [113.2644, 23.1291])
-    if (buildingsLayer) buildingsLayer.show()
-  } else {
-    // 禁用旋转和俯仰，恢复俯视角度
-    map.setStatus({ rotateEnable: false, pitchEnable: false })
-    map.setPitch(0)
-    map.setRotation(0)
-    map.setZoomAndCenter(12, [113.2644, 23.1291])
-    if (buildingsLayer) buildingsLayer.hide()
+
+  // 停止动画
+  stopGlobalLoop()
+
+  // 清除旧的覆盖物引用
+  Object.keys(routeAnimState).forEach((k) => delete routeAnimState[k])
+  mapStore.routeLines = []
+  mapStore.droneMarkers = []
+
+  // 销毁旧地图
+  if (mapStore.map) {
+    mapStore.map.destroy()
   }
+
+  // 创建新地图
+  createMap(mode)
 }
 
 // ── 航线渲染（轻量版：全局单循环）──────────────────
@@ -231,6 +251,9 @@ const COLOR_DIM = '#d1d5db'       // 灰色 - 未选中
 function drawRoutes(routes) {
   const map = mapStore.map
   if (!map || !AMap) return
+
+  // 保存航线数据，用于地图重建后重绘
+  lastRoutesData = routes
 
   // 清除旧数据
   stopGlobalLoop()
@@ -263,25 +286,25 @@ function drawRoutes(routes) {
     map.add(polyline)
     mapStore.routeLines.push(polyline)
 
-    // 起点
+    // 起点（圆点标记）
     const startMarker = new AMap.Marker({
       position: path[0],
-      content: '<div style="background:#10b981;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;white-space:nowrap;">起</div>',
-      offset: new AMap.Pixel(-10, -10),
+      content: '<div style="width:12px;height:12px;background:#10b981;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.15);"></div>',
+      offset: new AMap.Pixel(-6, -6),
       zIndex: 110,
     })
     map.add(startMarker)
 
-    // 终点
+    // 终点（圆点标记）
     const endMarker = new AMap.Marker({
       position: path[path.length - 1],
-      content: '<div style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;white-space:nowrap;">终</div>',
-      offset: new AMap.Pixel(-10, -10),
+      content: '<div style="width:12px;height:12px;background:#ef4444;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.15);"></div>',
+      offset: new AMap.Pixel(-6, -6),
       zIndex: 110,
     })
     map.add(endMarker)
 
-    // 无人机标记（轻量 SVG 图标，无 CSS 动画）
+    // 无人机标记（轻量 SVG 图标）
     const droneMarker = new AMap.Marker({
       position: path[0],
       content: '<div style="width:24px;height:24px;"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="4" fill="#10b981" stroke="#fff" stroke-width="2"/><line x1="4" y1="4" x2="10" y2="10" stroke="#10b981" stroke-width="2" stroke-linecap="round"/><line x1="20" y1="4" x2="14" y2="10" stroke="#10b981" stroke-width="2" stroke-linecap="round"/><line x1="4" y1="20" x2="10" y2="14" stroke="#10b981" stroke-width="2" stroke-linecap="round"/><line x1="20" y1="20" x2="14" y2="14" stroke="#10b981" stroke-width="2" stroke-linecap="round"/><circle cx="4" cy="4" r="2.5" fill="#10b981" opacity="0.8"/><circle cx="20" cy="4" r="2.5" fill="#10b981" opacity="0.8"/><circle cx="4" cy="20" r="2.5" fill="#10b981" opacity="0.8"/><circle cx="20" cy="20" r="2.5" fill="#10b981" opacity="0.8"/></svg></div>',
@@ -378,13 +401,11 @@ function stopGlobalLoop() {
 
 // ── 航线高亮 ──────────────────────────────────
 
-// 设置 Marker 透明度（兼容 content 自定义 HTML 的 Marker）
 function setMarkerOpacity(marker, opacity) {
   if (!marker) return
   try {
     marker.setOpacity(opacity)
   } catch {
-    // content 模式下 setOpacity 不可用，改为操作 DOM
     const el = marker.getContentDom?.() || marker.getDom?.()
     if (el) el.style.opacity = opacity
   }
@@ -399,17 +420,14 @@ function highlightRoute(routeId) {
     const state = routeAnimState[key]
     const isSelected = Number(key) === routeId
 
-    // 清理旧高亮线
     if (state._highlightLine) {
       state._highlightLine.setMap(null)
       state._highlightLine = null
     }
 
-    // 隐藏原始线
     state.polyline.hide()
 
     if (isSelected) {
-      // 选中：创建琥珀色高亮线
       const hlLine = new AMap.Polyline({
         path: state.path,
         strokeColor: COLOR_HIGHLIGHT,
@@ -440,7 +458,6 @@ function highlightRoute(routeId) {
     }
   }
 
-  // 定位
   const selectedState = routeAnimState[routeId]
   if (selectedState && map) {
     const target = selectedState._highlightLine || selectedState.polyline

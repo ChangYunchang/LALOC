@@ -114,14 +114,14 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, shallowRef } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { ElMessage } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
 import { getNoFlyZones, getHeightLimitZones } from '@/api/zones'
 
 const mapRef = ref(null)
-const map = shallowRef(null)
+let mapInstance = null
 let AMap = null
 
 // ── 中键旋转 ──────────────────────────────────
@@ -131,21 +131,21 @@ let rotStartY = 0
 let rotStartRotation = 0
 let rotStartPitch = 0
 
-function initMiddleButtonRotation(mapInstance, container) {
+function initMiddleButtonRotation(mapObj, container) {
   container.addEventListener('mousedown', (e) => {
     if (e.button === 1) {
       e.preventDefault()
       isRotating = true
       rotStartX = e.clientX
       rotStartY = e.clientY
-      rotStartRotation = mapInstance.getRotation()
-      rotStartPitch = mapInstance.getPitch()
+      rotStartRotation = mapObj.getRotation()
+      rotStartPitch = mapObj.getPitch()
     }
   })
   document.addEventListener('mousemove', (e) => {
     if (!isRotating) return
-    mapInstance.setRotation(rotStartRotation + (e.clientX - rotStartX) * 0.3)
-    mapInstance.setPitch(Math.max(0, Math.min(75, rotStartPitch - (e.clientY - rotStartY) * 0.3)))
+    mapObj.setRotation(rotStartRotation + (e.clientX - rotStartX) * 0.3)
+    mapObj.setPitch(Math.max(0, Math.min(75, rotStartPitch - (e.clientY - rotStartY) * 0.3)))
   })
   document.addEventListener('mouseup', (e) => {
     if (e.button === 1) isRotating = false
@@ -182,39 +182,33 @@ let buildingsLayer = null
 const amapKey = import.meta.env.VITE_AMAP_KEY
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE
 
-onMounted(async () => {
-  window._AMapSecurityConfig = { securityJsCode: amapSecurityCode }
+// ── 保存规划状态（地图重建后恢复）──────────────────
+let lastPlanPath = null
 
-  try {
-    AMap = await AMapLoader.load({
-      key: amapKey,
-      version: '2.0',
-      plugins: ['AMap.Scale', 'AMap.ToolBar', 'AMap.Buildings', 'AMap.GeometryUtil'],
-    })
+// ── 创建地图实例 ──────────────────────────────────
+function createMapInstance(mode) {
+  const mapObj = new AMap.Map('planning-map', {
+    viewMode: mode === '3D' ? '3D' : '2D',
+    pitch: mode === '3D' ? 55 : 0,
+    rotation: mode === '3D' ? -30 : 0,
+    zoom: mode === '3D' ? 14.5 : 12,
+    center: [113.2644, 23.1291],
+    mapStyle: 'amap://styles/whitesmoke',
+    features: mode === '3D' ? ['bg', 'road', 'building', 'point'] : ['bg', 'road', 'point'],
+    buildingAnimation: false,
+    rotateEnable: mode === '3D',
+    pitchEnable: mode === '3D',
+    jogEnable: true,
+    animateEnable: true,
+  })
 
-    // 默认以 3D 模式初始化，视角设为俯视（看起来像 2D）
-    map.value = new AMap.Map('planning-map', {
-      viewMode: '3D',
-      pitch: 0,
-      rotation: 0,
-      zoom: 12,
-      center: [113.2644, 23.1291],
-      mapStyle: 'amap://styles/whitesmoke',
-      features: ['bg', 'road', 'building', 'point'],
-      buildingAnimation: true,
-      rotateEnable: false,
-      pitchEnable: false,
-      jogEnable: true,
-      animateEnable: true,
-    })
+  mapObj.addControl(new AMap.Scale({ position: 'LB' }))
 
-    map.value.addControl(new AMap.Scale({ position: 'LB' }))
-    map.value.addControl(new AMap.ToolBar({ position: 'RT', liteStyle: true }))
+  // 中键旋转
+  initMiddleButtonRotation(mapObj, mapRef.value)
 
-    // 中键旋转
-    initMiddleButtonRotation(map.value, mapRef.value)
-
-    // 3D 建筑图层（默认隐藏）
+  // 3D 建筑图层（仅 3D 模式）
+  if (mode === '3D') {
     buildingsLayer = new AMap.Buildings({
       zooms: [14, 20],
       heightFactor: 1.5,
@@ -223,26 +217,54 @@ onMounted(async () => {
       borderColor: 'rgba(200, 200, 210, 0.6)',
       borderWeight: 1,
     })
-    map.value.add(buildingsLayer)
-    buildingsLayer.hide()
+    mapObj.add(buildingsLayer)
+  } else {
+    buildingsLayer = null
+  }
 
-    map.value.on('click', onMapClick)
+  mapObj.on('click', onMapClick)
 
-    // 加载禁飞区和限高区
-    await loadZones()
+  mapInstance = mapObj
+
+  // 加载禁飞区/限高区
+  loadZones()
+
+  // 恢复起终点标记和路径
+  if (startPoint.value) updateStartMarker(startPoint.value)
+  if (endPoint.value) updateEndMarker(endPoint.value)
+  if (lastPlanPath) drawRoute(lastPlanPath)
+}
+
+onMounted(async () => {
+  window._AMapSecurityConfig = { securityJsCode: amapSecurityCode }
+
+  try {
+    AMap = await AMapLoader.load({
+      key: amapKey,
+      version: '2.0',
+      plugins: ['AMap.Scale', 'AMap.Buildings', 'AMap.GeometryUtil'],
+    })
+
+    createMapInstance('2D')
   } catch (e) {
     console.error('地图加载失败:', e)
   }
 })
 
 onUnmounted(() => {
-  if (map.value) map.value.destroy()
+  if (mapInstance) mapInstance.destroy()
 })
 
 // 加载禁飞区/限高区
 async function loadZones() {
   try {
     const [noFlyData, heightData] = await Promise.all([getNoFlyZones(), getHeightLimitZones()])
+
+    // 清除旧多边形
+    noFlyPolygons.forEach(p => p.setMap(null))
+    heightLimitPolygons.forEach(p => p.setMap(null))
+    noFlyPolygons = []
+    heightLimitPolygons = []
 
     // 渲染禁飞区
     if (noFlyData?.features) {
@@ -261,9 +283,9 @@ async function loadZones() {
           new AMap.InfoWindow({
             content: `<div style="padding:8px 12px;"><b style="color:#dc2626">${name}</b><br/><span style="color:#6b7280;font-size:12px">${f.properties?.reason || ''}</span></div>`,
             offset: new AMap.Pixel(0, -10),
-          }).open(map.value, polygon.getBounds().getCenter())
+          }).open(mapInstance, polygon.getBounds().getCenter())
         })
-        map.value.add(polygon)
+        mapInstance.add(polygon)
         noFlyPolygons.push(polygon)
       })
     }
@@ -285,9 +307,9 @@ async function loadZones() {
           new AMap.InfoWindow({
             content: `<div style="padding:8px 12px;"><b style="color:#ea580c">${name}</b><br/><span style="color:#6b7280;font-size:12px">限高 ${alt} 米</span></div>`,
             offset: new AMap.Pixel(0, -10),
-          }).open(map.value, polygon.getBounds().getCenter())
+          }).open(mapInstance, polygon.getBounds().getCenter())
         })
-        map.value.add(polygon)
+        mapInstance.add(polygon)
         heightLimitPolygons.push(polygon)
       })
     }
@@ -296,29 +318,30 @@ async function loadZones() {
   }
 }
 
-// 切换 2D/3D
+// 切换 2D/3D（销毁重建地图）
 function switchMode(mode) {
+  if (viewMode.value === mode) return
   viewMode.value = mode
-  if (!map.value) return
-  if (mode === '3D') {
-    // 启用旋转和俯仰
-    map.value.setStatus({ rotateEnable: true, pitchEnable: true })
-    map.value.setPitch(55)
-    map.value.setRotation(-30)
-    map.value.setZoomAndCenter(14.5, [113.2644, 23.1291])
-    if (buildingsLayer) buildingsLayer.show()
-  } else {
-    // 禁用旋转和俯仰，恢复俯视角度
-    map.value.setStatus({ rotateEnable: false, pitchEnable: false })
-    map.value.setPitch(0)
-    map.value.setRotation(0)
-    map.value.setZoomAndCenter(12, [113.2644, 23.1291])
-    if (buildingsLayer) buildingsLayer.hide()
+
+  // 销毁旧地图
+  if (mapInstance) {
+    mapInstance.destroy()
+    mapInstance = null
   }
+
+  // 清除引用
+  startMarker = null
+  endMarker = null
+  routeLine = null
+  noFlyPolygons = []
+  heightLimitPolygons = []
+
+  // 创建新地图
+  createMapInstance(mode)
 }
 
 function onMapClick(e) {
-  if (!pickingPoint.value) return
+  if (!pickingPoint.value || !mapInstance) return
   const lnglat = { lng: e.lnglat.getLng(), lat: e.lnglat.getLat() }
 
   if (pickingPoint.value === 'start') {
@@ -348,25 +371,25 @@ function geocodeStart() { const c = parseCoords(startInput.value); if (c) { star
 function geocodeEnd() { const c = parseCoords(endInput.value); if (c) { endPoint.value = c; updateEndMarker(c) } }
 
 function updateStartMarker(pos) {
-  if (!map.value || !AMap) return
-  if (startMarker) map.value.remove(startMarker)
+  if (!mapInstance || !AMap) return
+  if (startMarker) mapInstance.remove(startMarker)
   startMarker = new AMap.Marker({
     position: [pos.lng, pos.lat],
-    content: '<div style="background:#16a34a;color:#fff;padding:4px 10px;border-radius:6px;font-weight:600;font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,0.15);">起点</div>',
-    offset: new AMap.Pixel(-20, -15), anchor: 'center',
+    content: '<div style="width:12px;height:12px;background:#16a34a;border-radius:50%;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.3);"></div>',
+    offset: new AMap.Pixel(-6, -6), anchor: 'center',
   })
-  map.value.add(startMarker)
+  mapInstance.add(startMarker)
 }
 
 function updateEndMarker(pos) {
-  if (!map.value || !AMap) return
-  if (endMarker) map.value.remove(endMarker)
+  if (!mapInstance || !AMap) return
+  if (endMarker) mapInstance.remove(endMarker)
   endMarker = new AMap.Marker({
     position: [pos.lng, pos.lat],
-    content: '<div style="background:#dc2626;color:#fff;padding:4px 10px;border-radius:6px;font-weight:600;font-size:12px;box-shadow:0 2px 4px rgba(0,0,0,0.15);">终点</div>',
-    offset: new AMap.Pixel(-20, -15), anchor: 'center',
+    content: '<div style="width:12px;height:12px;background:#dc2626;border-radius:50%;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.3);"></div>',
+    offset: new AMap.Pixel(-6, -6), anchor: 'center',
   })
-  map.value.add(endMarker)
+  mapInstance.add(endMarker)
 }
 
 function addWaypoint() { waypoints.value.push({ input: '' }) }
@@ -396,15 +419,19 @@ async function doPlan() {
 }
 
 function drawRoute(pathPoints) {
-  if (!map.value || !AMap || !pathPoints?.length) return
-  if (routeLine) map.value.remove(routeLine)
+  if (!mapInstance || !AMap || !pathPoints?.length) return
+  if (routeLine) mapInstance.remove(routeLine)
+
+  // 保存路径数据（地图重建后恢复）
+  lastPlanPath = pathPoints
+
   routeLine = new AMap.Polyline({
     path: pathPoints.map(p => [p.lng, p.lat]),
     strokeColor: '#2563eb', strokeWeight: 5, strokeOpacity: 0.9,
     showDir: true, lineJoin: 'round', lineCap: 'round', zIndex: 100,
   })
-  map.value.add(routeLine)
-  map.value.setFitView([routeLine, startMarker, endMarker].filter(Boolean))
+  mapInstance.add(routeLine)
+  mapInstance.setFitView([routeLine, startMarker, endMarker].filter(Boolean))
 }
 
 function formatTime(s) {
