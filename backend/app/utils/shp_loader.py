@@ -2,6 +2,7 @@
 Shapefile 数据导入工具
 将禁飞区和限高区的 .shp 文件导入 PostgreSQL + PostGIS 数据库
 """
+import os
 import geopandas as gpd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -148,12 +149,20 @@ def _insert_polygon(
         )
 
 
+def get_data_dir():
+    """获取项目 data 目录的绝对路径（相对于 backend 目录向上两级）"""
+    # backend/app/utils/shp_loader.py -> backend -> LALOC/data
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+    return os.path.join(project_root, "data")
+
+
 def import_all_data():
-    """导入所有禁飞区和限高区数据"""
-    import os
+    """导入所有禁飞区和限高区数据（从项目 data 目录读取）"""
+    data_dir = get_data_dir()
 
     # 禁飞区
-    nofly_shp = r"D:\桌面\禁飞区\JinFeiQu.shp"
+    nofly_shp = os.path.join(data_dir, "nofly_zones", "JinFeiQu.shp")
     if os.path.exists(nofly_shp):
         import_shapefile_to_postgis(
             shp_path=nofly_shp,
@@ -162,20 +171,20 @@ def import_all_data():
             reason="政府划定的禁飞区域",
         )
     else:
-        print(f"禁飞区文件不存在: {nofly_shp}")
+        print(f"[警告] 禁飞区文件不存在: {nofly_shp}")
 
     # 限高区
-    height_shp = r"D:\桌面\限高区\XianGaoQu.shp"
+    height_shp = os.path.join(data_dir, "height_limit_zones", "XianGaoQu.shp")
     if os.path.exists(height_shp):
         import_shapefile_to_postgis(
             shp_path=height_shp,
             table_name="height_limit_zones",
             name_prefix="限高区",
-            max_altitude=120,  # 默认限高120米
+            max_altitude=120,
             reason="政府划定的限高区域",
         )
     else:
-        print(f"限高区文件不存在: {height_shp}")
+        print(f"[警告] 限高区文件不存在: {height_shp}")
 
 
 if __name__ == "__main__":
