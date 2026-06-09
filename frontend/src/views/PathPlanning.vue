@@ -177,6 +177,7 @@ let endMarker = null
 let routeLine = null
 let noFlyPolygons = []
 let heightLimitPolygons = []
+let buildingsLayer = null
 
 const amapKey = import.meta.env.VITE_AMAP_KEY
 const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE
@@ -191,6 +192,7 @@ onMounted(async () => {
       plugins: ['AMap.Scale', 'AMap.ToolBar', 'AMap.Buildings', 'AMap.GeometryUtil'],
     })
 
+    // 默认以 3D 模式初始化，视角设为俯视（看起来像 2D）
     map.value = new AMap.Map('planning-map', {
       viewMode: '3D',
       pitch: 0,
@@ -202,6 +204,8 @@ onMounted(async () => {
       buildingAnimation: true,
       rotateEnable: false,
       pitchEnable: false,
+      jogEnable: true,
+      animateEnable: true,
     })
 
     map.value.addControl(new AMap.Scale({ position: 'LB' }))
@@ -210,8 +214,8 @@ onMounted(async () => {
     // 中键旋转
     initMiddleButtonRotation(map.value, mapRef.value)
 
-    // 白模建筑
-    const buildings = new AMap.Buildings({
+    // 3D 建筑图层（默认隐藏）
+    buildingsLayer = new AMap.Buildings({
       zooms: [14, 20],
       heightFactor: 1.5,
       wallColor: 'rgba(255, 255, 255, 0.9)',
@@ -219,7 +223,8 @@ onMounted(async () => {
       borderColor: 'rgba(200, 200, 210, 0.6)',
       borderWeight: 1,
     })
-    map.value.add(buildings)
+    map.value.add(buildingsLayer)
+    buildingsLayer.hide()
 
     map.value.on('click', onMapClick)
 
@@ -296,13 +301,19 @@ function switchMode(mode) {
   viewMode.value = mode
   if (!map.value) return
   if (mode === '3D') {
+    // 启用旋转和俯仰
+    map.value.setStatus({ rotateEnable: true, pitchEnable: true })
     map.value.setPitch(55)
     map.value.setRotation(-30)
     map.value.setZoomAndCenter(14.5, [113.2644, 23.1291])
+    if (buildingsLayer) buildingsLayer.show()
   } else {
+    // 禁用旋转和俯仰，恢复俯视角度
+    map.value.setStatus({ rotateEnable: false, pitchEnable: false })
     map.value.setPitch(0)
     map.value.setRotation(0)
     map.value.setZoomAndCenter(12, [113.2644, 23.1291])
+    if (buildingsLayer) buildingsLayer.hide()
   }
 }
 
