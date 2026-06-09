@@ -163,6 +163,101 @@
 
 ---
 
+## 新成员首次部署
+
+> 以下为新成员克隆项目后的首次部署步骤。
+
+### 前提条件
+
+- Docker Desktop 已安装并运行
+- Python 3.12+ 已安装
+- Node.js 20+ 已安装
+- Git 已安装
+
+### 第一步：克隆项目
+
+```bash
+git clone <仓库地址>
+cd LALOC
+```
+
+### 第二步：启动 Docker 数据库
+
+```bash
+docker compose up -d
+```
+
+### 第三步：安装后端依赖
+
+```bash
+cd backend
+python -m venv venv
+source venv/Scripts/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 第四步：获取数据文件
+
+禁飞区和限高区的 Shapefile 数据文件需要从项目负责人处获取，放置到以下位置：
+
+```
+桌面/
+├── 禁飞区/
+│   └── JinFeiQu.shp (+ .dbf, .shx, .prj 等)
+└── 限高区/
+    └── XianGaoQu.shp (+ .dbf, .shx, .prj 等)
+```
+
+或放到项目目录下：
+
+```
+LALOC/data/
+├── nofly_zones/
+│   └── JinFeiQu.shp
+└── height_limit_zones/
+    └── XianGaoQu.shp
+```
+
+### 第五步：初始化数据库
+
+```bash
+# 创建数据库表
+alembic upgrade head
+
+# 导入禁飞区和限高区数据
+python -m app.utils.shp_loader
+
+# 导入模拟航线数据（可选）
+python seed_routes.py
+```
+
+### 第六步：安装前端依赖
+
+```bash
+cd ../frontend
+npm install
+```
+
+### 第七步：启动服务
+
+```bash
+# 终端 1：启动后端
+cd backend
+source venv/Scripts/activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 终端 2：启动前端
+cd frontend
+npm run dev
+```
+
+### 第七步：访问系统
+
+- 前端：http://localhost:5173
+- API 文档：http://localhost:8000/docs
+
+---
+
 ## 每次开机启动流程
 
 > 以下为 Windows 环境下的启动步骤，每次开机后按顺序执行。

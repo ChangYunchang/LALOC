@@ -151,31 +151,41 @@ def _insert_polygon(
 def import_all_data():
     """导入所有禁飞区和限高区数据"""
     import os
+    from pathlib import Path
+
+    # 优先从项目 data 目录读取，否则从桌面读取
+    project_root = Path(__file__).parent.parent.parent.parent
+    data_dir = project_root / "data"
+    desktop_dir = Path.home() / "Desktop"
 
     # 禁飞区
-    nofly_shp = r"D:\桌面\禁飞区\JinFeiQu.shp"
-    if os.path.exists(nofly_shp):
+    nofly_shp = data_dir / "nofly_zones" / "JinFeiQu.shp"
+    if not nofly_shp.exists():
+        nofly_shp = desktop_dir / "禁飞区" / "JinFeiQu.shp"
+    if nofly_shp.exists():
         import_shapefile_to_postgis(
-            shp_path=nofly_shp,
+            shp_path=str(nofly_shp),
             table_name="no_fly_zones",
             name_prefix="禁飞区",
             reason="政府划定的禁飞区域",
         )
     else:
-        print(f"禁飞区文件不存在: {nofly_shp}")
+        print(f"禁飞区文件不存在，请将数据放到 data/nofly_zones/ 或桌面/禁飞区/")
 
     # 限高区
-    height_shp = r"D:\桌面\限高区\XianGaoQu.shp"
-    if os.path.exists(height_shp):
+    height_shp = data_dir / "height_limit_zones" / "XianGaoQu.shp"
+    if not height_shp.exists():
+        height_shp = desktop_dir / "限高区" / "XianGaoQu.shp"
+    if height_shp.exists():
         import_shapefile_to_postgis(
-            shp_path=height_shp,
+            shp_path=str(height_shp),
             table_name="height_limit_zones",
             name_prefix="限高区",
             max_altitude=120,  # 默认限高120米
             reason="政府划定的限高区域",
         )
     else:
-        print(f"限高区文件不存在: {height_shp}")
+        print(f"限高区文件不存在，请将数据放到 data/height_limit_zones/ 或桌面/限高区/")
 
 
 if __name__ == "__main__":
