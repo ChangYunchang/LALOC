@@ -29,6 +29,10 @@
       <span class="legend-line" style="background: #ef4444;"></span>
       <span>限高区飞行</span>
     </div>
+    <div class="legend-item">
+      <span class="legend-line" style="background: #a855f7;"></span>
+      <span>建筑避让</span>
+    </div>
     <div class="legend-divider"></div>
     <div class="legend-item">
       <span class="legend-dot" style="background: #16a34a;"></span>

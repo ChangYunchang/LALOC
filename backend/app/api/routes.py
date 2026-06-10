@@ -30,8 +30,17 @@ def get_all_routes(db: Session = Depends(get_db)):
         else:
             line_json = None
 
-        # 高度剖面（跳过建筑物查询以加速列表接口，详情接口才计算）
+        # 高度剖面
         altitude_profile = None
+        if line_json and line_json.get("coordinates"):
+            coords = line_json["coordinates"]
+            path = [(c[0], c[1]) for c in coords]
+            try:
+                profile = compute_altitude_profile(db, path)
+                if profile and len(profile) == len(coords):
+                    altitude_profile = profile
+            except Exception:
+                altitude_profile = None
 
         result.append({
             "id": route.id,
@@ -65,6 +74,15 @@ def get_route(route_id: int, db: Session = Depends(get_db)):
 
     # 高度剖面
     altitude_profile = None
+    if line_json and line_json.get("coordinates"):
+        coords = line_json["coordinates"]
+        path = [(c[0], c[1]) for c in coords]
+        try:
+            profile = compute_altitude_profile(db, path)
+            if profile and len(profile) == len(coords):
+                altitude_profile = profile
+        except Exception:
+            altitude_profile = None
 
     return {
         "id": route.id,

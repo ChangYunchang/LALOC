@@ -71,26 +71,14 @@ function initColors() {
   COL.phase = {
     ascent: c('#22c55e'), cruise: c('#3b82f6'),
     descent: c('#f59e0b'), height_limit: c('#ef4444'),
+    building: c('#a855f7'),
   }
   COL.phaseHighlight = {
     ascent: c('#4ade80'), cruise: c('#60a5fa'),
     descent: c('#fbbf24'), height_limit: c('#f87171'),
+    building: c('#c084fc'),
   }
 }
-
-// ── SVG 无人机图标 (Data URI) ──────────────────
-const DRONE_SVG = 'data:image/svg+xml,' + encodeURIComponent(
-  '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
-  '<circle cx="12" cy="12" r="4" fill="#10b981" stroke="#fff" stroke-width="2"/>' +
-  '<line x1="4" y1="4" x2="10" y2="10" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>' +
-  '<line x1="20" y1="4" x2="14" y2="10" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>' +
-  '<line x1="4" y1="20" x2="10" y2="14" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>' +
-  '<line x1="20" y1="20" x2="14" y2="14" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>' +
-  '<circle cx="4" cy="4" r="2.5" fill="#10b981" opacity="0.8"/>' +
-  '<circle cx="20" cy="4" r="2.5" fill="#10b981" opacity="0.8"/>' +
-  '<circle cx="4" cy="20" r="2.5" fill="#10b981" opacity="0.8"/>' +
-  '<circle cx="20" cy="20" r="2.5" fill="#10b981" opacity="0.8"/></svg>'
-)
 
 // ── 创建 Cesium Viewer ─────────────────────────
 async function createViewer() {
@@ -174,6 +162,50 @@ async function createViewer() {
       show: true,
     })
     console.log('Cesium OSM Buildings loaded')
+
+    // 注册建筑点击交互
+    const buildingClickHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
+    buildingClickHandler.setInputAction((movement) => {
+      const picked = viewer.scene.pick(movement.position)
+      // Cesium3DTileFeature：OSM Buildings 的特征类型
+      if (Cesium.defined(picked) && picked instanceof Cesium.Cesium3DTileFeature) {
+        const props = {}
+        try {
+          const names = picked.getPropertyNames()
+          names.forEach(n => { try { props[n] = picked.getProperty(n) } catch {} })
+        } catch {}
+
+        const osmId = props.osm_id || props['@id'] || '-'
+        const buildingHeight = props.height || null
+        const levels = props['building:levels'] || props.levels || null
+        const name = props.name || `建筑 #${osmId}`
+
+        // 估算高度
+        let heightStr = '未知'
+        if (buildingHeight) heightStr = `${buildingHeight}m`
+        else if (levels) heightStr = `~${levels * 3}m (${levels}层)`
+
+        // 显示 label
+        const cartesian = viewer.scene.pickPosition(movement.position)
+        if (cartesian) {
+          viewer.entities.add({
+            position: cartesian,
+            label: {
+              text: `🏢 ${name}`,
+              font: '13px sans-serif',
+              fillColor: Cesium.Color.WHITE,
+              outlineColor: Cesium.Color.fromCssColorString('#1f2937'),
+              outlineWidth: 3,
+              style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+              verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+              pixelOffset: new Cesium.Cartesian2(0, -20),
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          })
+          console.log('Building clicked:', { osmId, name, height: props.height, levels: props['building:levels'] })
+        }
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
   } catch (e) {
     console.warn('Cesium OSM Buildings load failed (may need valid ion token):', e.message)
   }
@@ -184,10 +216,30 @@ async function createViewer() {
   // 渲染区域
   renderZones()
 
-  // 重绘航线
-  if (lastRoutesData) {
+  // 重绘航线（优先从 store 获取）
+  const storedRoutes = mapStore.routeDataList
+  if (storedRoutes?.length) {
+    drawRoutes(storedRoutes)
+  } else if (lastRoutesData) {
     drawRoutes(lastRoutesData)
   }
+
+  // 首次加载时定位广州（仅一次，不覆盖用户操作）
+  setTimeout(() => {
+    if (viewer && !viewer.isDestroyed() && !viewer._userInteracted) {
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(113.35, 23.10, 8000),
+        orientation: { heading: Cesium.Math.toRadians(30), pitch: Cesium.Math.toRadians(-45) },
+        duration: 1.5,
+      })
+      viewer._userInteracted = true
+    }
+  }, 2000)
+
+  // 标记用户已手动操作相机，停止自动 flyTo
+  viewer.camera.changed.addEventListener(() => {
+    if (viewer) viewer._userInteracted = true
+  })
 
   console.log('Cesium viewer ready')
 }
@@ -328,44 +380,54 @@ function drawRoutes(routes) {
       polylines.push(polyline)
     }
 
-    // 起终点标记
-    const startPos = Cesium.Cartesian3.fromDegrees(coords[0][0], coords[0][1], 0)
-    const endPos = Cesium.Cartesian3.fromDegrees(
-      coords[coords.length - 1][0],
-      coords[coords.length - 1][1],
-      0
-    )
+    // 起终点标记 — 使用航线首尾高度，与航线连接
+    const startAlt = altProfile && altProfile[0] ? altProfile[0].alt : 100
+    const endAltIdx = coords.length - 1
+    const endAlt = altProfile && altProfile[endAltIdx] ? altProfile[endAltIdx].alt : 100
 
     const startEntity = viewer.entities.add({
-      position: startPos,
+      position: Cesium.Cartesian3.fromDegrees(coords[0][0], coords[0][1], startAlt),
       point: {
         pixelSize: 10,
         color: Cesium.Color.fromCssColorString('#10b981'),
         outlineColor: Cesium.Color.WHITE,
         outlineWidth: 1,
-        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       },
     })
 
     const endEntity = viewer.entities.add({
-      position: endPos,
+      position: Cesium.Cartesian3.fromDegrees(
+        coords[endAltIdx][0],
+        coords[endAltIdx][1],
+        endAlt
+      ),
       point: {
         pixelSize: 10,
         color: Cesium.Color.fromCssColorString('#ef4444'),
         outlineColor: Cesium.Color.WHITE,
         outlineWidth: 1,
-        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       },
     })
 
-    // 无人机
+    // 无人机（使用 point + label，比 SVG billboard 更可靠）
     const droneEntity = viewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(coords[0][0], coords[0][1], 100),
-      billboard: {
-        image: DRONE_SVG,
-        width: 32,
-        height: 32,
-        heightReference: Cesium.HeightReference.NONE,
+      point: {
+        pixelSize: 12,
+        color: Cesium.Color.fromCssColorString('#10b981'),
+        outlineColor: Cesium.Color.WHITE,
+        outlineWidth: 2,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+      label: {
+        text: '🚁',
+        font: '18px sans-serif',
+        style: Cesium.LabelStyle.FILL,
+        fillColor: Cesium.Color.WHITE,
+        pixelOffset: new Cesium.Cartesian2(14, -8),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       },
     })
 
@@ -424,17 +486,7 @@ function startGlobalLoop() {
       const alt = alt1 + (alt2 - alt1) * frac
 
       droneEntity.position = Cesium.Cartesian3.fromDegrees(lng, lat, alt)
-
-      if (isSelected && viewer) {
-        viewer.camera.flyTo({
-          destination: Cesium.Cartesian3.fromDegrees(lng, lat, alt + 2000),
-          orientation: {
-            heading: viewer.camera.heading,
-            pitch: Cesium.Math.toRadians(-45),
-          },
-          duration: 0,
-        })
-      }
+      // 不再自动跟踪镜头 — 让用户自由浏览
     })
 
     globalRafId = requestAnimationFrame(tick)
@@ -459,28 +511,39 @@ function highlightRoute(routeId) {
 
     group.polylines?.forEach((p) => {
       if (isSelected) {
-        p.polyline.material = new Cesium.PolylineDashMaterialProperty({
-          color: COL.highlight,
-          dashLength: 0,
-        })
         p.polyline.width = 6
+        // 保留原始 material，设置 show=true
+        p.show = true
       } else {
-        p.polyline.material = new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.GRAY.withAlpha(0.4),
-          dashLength: 16,
-        })
         p.polyline.width = 2
+        p.show = true
+        // 非选中降低透明度 — 仅对 Color material 有效
+        if (p.polyline.material instanceof Cesium.Color) {
+          p.polyline.material = p.polyline.material.withAlpha(0.2)
+        }
       }
     })
 
-    if (group.droneEntity?.billboard) {
-      group.droneEntity.billboard.color = isSelected
-        ? Cesium.Color.WHITE
-        : Cesium.Color.WHITE.withAlpha(0.3)
+    if (group.droneEntity) {
+      group.droneEntity.show = true
+      if (group.droneEntity.point) {
+        group.droneEntity.point.pixelSize = isSelected ? 16 : 8
+        group.droneEntity.point.color = isSelected
+          ? Cesium.Color.fromCssColorString('#10b981')
+          : Cesium.Color.fromCssColorString('#10b981').withAlpha(0.3)
+      }
+      if (group.droneEntity.label) {
+        group.droneEntity.label.show = isSelected
+      }
+    }
+    if (group.startEntity?.point) {
+      group.startEntity.point.pixelSize = isSelected ? 14 : 8
+    }
+    if (group.endEntity?.point) {
+      group.endEntity.point.pixelSize = isSelected ? 14 : 8
     }
   })
 
-  // 飞行到选中航线
   const entityGroup = routeEntities[routeId]
   if (entityGroup && entityGroup.polylines?.length) {
     viewer.flyTo(entityGroup.polylines[0], { offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 5000) })
@@ -494,9 +557,23 @@ function resetRouteHighlight() {
   Object.entries(routeEntities).forEach(([, group]) => {
     group.polylines?.forEach((p) => {
       p.polyline.width = 4
+      p.show = true
     })
-    if (group.droneEntity?.billboard) {
-      group.droneEntity.billboard.color = Cesium.Color.WHITE
+    if (group.droneEntity) {
+      group.droneEntity.show = true
+      if (group.droneEntity.point) {
+        group.droneEntity.point.pixelSize = 12
+        group.droneEntity.point.color = Cesium.Color.fromCssColorString('#10b981')
+      }
+      if (group.droneEntity.label) {
+        group.droneEntity.label.show = false
+      }
+    }
+    if (group.startEntity?.point) {
+      group.startEntity.point.pixelSize = 10
+    }
+    if (group.endEntity?.point) {
+      group.endEntity.point.pixelSize = 10
     }
   })
 }
@@ -520,6 +597,17 @@ function setDronePosition(routeId, progress) {
   const alt = alt1 + (alt2 - alt1) * frac
 
   droneEntity.position = Cesium.Cartesian3.fromDegrees(lng, lat, alt)
+  // 时间轴控制时镜头跟随无人机
+  if (viewer && !viewer.isDestroyed()) {
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(lng, lat, alt + 1500),
+      orientation: {
+        heading: viewer.camera.heading,
+        pitch: Cesium.Math.toRadians(-35),
+      },
+      duration: 0,
+    })
+  }
 }
 
 function pauseDrone(routeId) {
@@ -595,8 +683,9 @@ function drawPlanPath(pathPoints, altitudeProfile) {
       const phase = altitudeProfile[startIdx].phase
       const color = phaseColors[phase] || Cesium.Color.fromCssColorString('#3b82f6')
       const segPoints = pathPoints.slice(startIdx, endIdx + 1)
-      const positions = segPoints.map(p => {
-        const alt = altitudeProfile[startIdx]?.alt || 100
+      const positions = segPoints.map((p, i) => {
+        const idx = startIdx + i
+        const alt = altitudeProfile && altitudeProfile[idx] ? altitudeProfile[idx].alt : 100
         return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt)
       })
       if (positions.length >= 2) {
@@ -607,7 +696,7 @@ function drawPlanPath(pathPoints, altitudeProfile) {
       }
     }
   }
-  viewer.flyTo(planPathEntities[0], { offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 3000) })
+  // 不自动 flyTo — 让用户自由浏览
 }
 
 function clearPlanPath() {

@@ -23,6 +23,9 @@
             <el-input v-model="waypoints[index].input" :placeholder="`途经点 ${index + 1}`" size="small">
               <template #prefix><span style="color:#2563eb">●</span></template>
             </el-input>
+            <el-button size="small" @click="pickPoint('waypoint-' + index)">
+              {{ pickingPoint === 'waypoint-' + index ? '取消' : '选点' }}
+            </el-button>
             <el-button size="small" type="danger" @click="removeWaypoint(index)">删除</el-button>
           </div>
         </div>
@@ -56,6 +59,7 @@
         </div>
         <div class="param-item"><el-checkbox v-model="avoidNoFly">避开禁飞区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidHeightLimit">避开限高区</el-checkbox></div>
+        <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="considerWeather">考虑天气</el-checkbox></div>
       </div>
 
@@ -89,22 +93,6 @@
     <div class="map-area">
       <MapContainer ref="mapContainerRef" />
 
-      <!-- 图例 - 右下角 -->
-      <div class="planning-legend">
-        <div class="legend-group-title">区域</div>
-        <div class="legend-item"><span class="lc" style="background:rgba(252,165,165,0.5);border-color:#dc2626;"></span>禁飞区</div>
-        <div class="legend-item"><span class="lc" style="background:rgba(253,186,116,0.4);border-color:#ea580c;"></span>限高区</div>
-        <div class="legend-divider"></div>
-        <div class="legend-group-title">飞行阶段</div>
-        <div class="legend-item"><span class="ll" style="background:#22c55e;"></span>爬升段</div>
-        <div class="legend-item"><span class="ll" style="background:#3b82f6;"></span>巡航段</div>
-        <div class="legend-item"><span class="ll" style="background:#f59e0b;"></span>下降段</div>
-        <div class="legend-item"><span class="ll" style="background:#ef4444;"></span>限高区飞行</div>
-        <div class="legend-item"><span class="ll" style="background:#a855f7;"></span>建筑避让</div>
-        <div class="legend-divider"></div>
-        <div class="legend-item"><span class="ld" style="background:#16a34a;"></span>起点</div>
-        <div class="legend-item"><span class="ld" style="background:#dc2626;"></span>终点</div>
-      </div>
     </div>
   </div>
 </template>
@@ -113,6 +101,7 @@
 import { ref, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
+import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
 
 const mapContainerRef = ref(null)
@@ -127,16 +116,20 @@ const droneSpeed = ref(15)
 const safetyMargin = ref(50)
 const avoidNoFly = ref(true)
 const avoidHeightLimit = ref(true)
+const avoidBuildings = ref(true)
 const considerWeather = ref(true)
 
 const pickingPoint = ref(null)
 const planning = ref(false)
 const planResult = ref(null)
 
-// 自定义标记（不随模式切换丢失 — 每次 drawRoute 重建）
+// 自定义标记
 let startMarker = null
 let endMarker = null
+let waypointMarkers = []
 let pathLines = []
+let lastPlanPath = null
+let lastAltProfile = null
 
 // 飞行阶段颜色映射
 const PHASE_COLORS = {
@@ -147,6 +140,11 @@ const PHASE_COLORS = {
   building: '#a855f7',
 }
 
+// ── 2D/3D 切换时重绘规划路径 ──────────────────
+watch(() => mapContainerRef.value?.viewMode, () => {
+  redrawAfterModeSwitch()
+})
+
 // ── 地图点击选点 ──────────────────────────────
 watch(pickingPoint, (val) => {
   if (val) {
@@ -156,16 +154,46 @@ watch(pickingPoint, (val) => {
   }
 })
 
-function onMapClick(pos) {
+async function onMapClick(pos) {
   if (!pickingPoint.value) return
+  const mapRef = mapContainerRef.value
+
+  // 检查点击位置是否在禁飞区/限高区内
+  try {
+    const check = await checkPoint(pos.lng, pos.lat)
+    if (check.in_no_fly_zone) {
+      ElMessage.error('该位置在禁飞区内，无法选点')
+      pickingPoint.value = null
+      return
+    }
+    if (check.height_limits?.length > 0) {
+      const limits = check.height_limits.map(l => l.max_altitude ? `${l.max_altitude}m` : l.name).join(', ')
+      ElMessage.warning(`该位置在限高区内 (${limits})，请谨慎选择`)
+    }
+  } catch {
+    // API 调用失败时仍允许选点
+  }
+
   if (pickingPoint.value === 'start') {
     startPoint.value = pos
     startInput.value = `${pos.lng.toFixed(6)}, ${pos.lat.toFixed(6)}`
+    if (startMarker) mapRef?.removeMarker(startMarker)
+    startMarker = mapRef?.addMarker(pos.lng, pos.lat, '#16a34a')
     ElMessage.success('起点已设置')
   } else if (pickingPoint.value === 'end') {
     endPoint.value = pos
     endInput.value = `${pos.lng.toFixed(6)}, ${pos.lat.toFixed(6)}`
+    if (endMarker) mapRef?.removeMarker(endMarker)
+    endMarker = mapRef?.addMarker(pos.lng, pos.lat, '#dc2626')
     ElMessage.success('终点已设置')
+  } else if (pickingPoint.value.startsWith('waypoint-')) {
+    const idx = parseInt(pickingPoint.value.split('-')[1])
+    if (waypoints.value[idx]) {
+      waypoints.value[idx].input = `${pos.lng.toFixed(6)}, ${pos.lat.toFixed(6)}`
+      if (waypointMarkers[idx]) mapRef?.removeMarker(waypointMarkers[idx])
+      waypointMarkers[idx] = mapRef?.addMarker(pos.lng, pos.lat, '#2563eb')
+      ElMessage.success(`途经点 ${idx + 1} 已设置`)
+    }
   }
   pickingPoint.value = null
 }
@@ -210,6 +238,7 @@ async function doPlan() {
       safety_margin: safetyMargin.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
+      avoid_buildings: avoidBuildings.value,
       consider_weather: considerWeather.value,
     })
     planResult.value = result
@@ -225,24 +254,45 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   const mapRef = mapContainerRef.value
   if (!mapRef || !pathPoints?.length) return
 
-  // 清除旧标记和线条
+  // 保存数据以便模式切换后重绘
+  lastPlanPath = pathPoints
+  lastAltProfile = altitudeProfile
+
   clearOldPath()
   mapRef.clearPlanPath()
 
-  await nextTick()
+  // 等待地图引擎准备好
+  await new Promise(r => setTimeout(r, 300))
 
-  // 添加起终点标记
+  // 添加起点标记
   startMarker = mapRef.addMarker(pathPoints[0].lng, pathPoints[0].lat, '#16a34a')
+  // 添加终点标记
   const end = pathPoints[pathPoints.length - 1]
   endMarker = mapRef.addMarker(end.lng, end.lat, '#dc2626')
+  // 添加途经点标记
+  const activeWaypoints = waypoints.value
+    .map(wp => parseCoords(wp.input))
+    .filter(Boolean)
+  for (const wp of activeWaypoints) {
+    const m = mapRef.addMarker(wp.lng, wp.lat, '#2563eb')
+    if (m) waypointMarkers.push(m)
+  }
 
-  // 绘制路径线（通过 MapContainer 统一接口，2D/3D 自动适配）
+  // 绘制路径线
   mapRef.drawPlanPath(pathPoints, altitudeProfile)
+}
+
+function redrawAfterModeSwitch() {
+  if (lastPlanPath) {
+    setTimeout(() => drawRouteOnMap(lastPlanPath, lastAltProfile), 500)
+  }
 }
 
 function clearOldPath() {
   if (startMarker) { mapContainerRef.value?.removeMarker(startMarker); startMarker = null }
   if (endMarker) { mapContainerRef.value?.removeMarker(endMarker); endMarker = null }
+  waypointMarkers.forEach(m => mapContainerRef.value?.removeMarker(m))
+  waypointMarkers = []
 }
 
 function formatTime(s) {
@@ -291,18 +341,4 @@ function formatTime(s) {
 
 .map-area { flex: 1; position: relative; }
 
-/* 图例 - 右下角 */
-.planning-legend {
-  position: absolute; bottom: 35px; right: 15px; z-index: 100;
-  background: rgba(255,255,255,0.95); border: 1px solid #e5e7eb;
-  border-radius: 10px; padding: 10px 14px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-}
-.legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px; color: #374151; }
-.legend-item:last-child { margin-bottom: 0; }
-.legend-group-title { font-size: 11px; font-weight: 600; color: #6b7280; margin-bottom: 4px; }
-.legend-divider { height: 1px; background: #e5e7eb; margin: 6px 0; }
-.lc { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; }
-.ll { width: 18px; height: 3px; border-radius: 2px; }
-.ld { width: 10px; height: 10px; border-radius: 50%; margin: 0 4px; }
 </style>

@@ -57,6 +57,7 @@ function getActive() {
 }
 
 defineExpose({
+  viewMode,  // 暴露响应式 viewMode 供父组件监听
   drawRoutes: (...args) => getActive()?.drawRoutes(...args),
   highlightRoute: (...args) => getActive()?.highlightRoute(...args),
   resetRouteHighlight: (...args) => getActive()?.resetRouteHighlight(...args),

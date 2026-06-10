@@ -34,12 +34,14 @@ const PHASE_COLORS = {
   cruise: '#3b82f6',
   descent: '#f59e0b',
   height_limit: '#ef4444',
+  building: '#a855f7',
 }
 const PHASE_COLORS_HIGHLIGHT = {
   ascent: '#4ade80',
   cruise: '#60a5fa',
   descent: '#fbbf24',
   height_limit: '#f87171',
+  building: '#c084fc',
 }
 
 // ── 中键拖拽 ──────────────────────────────────
@@ -499,6 +501,11 @@ onUnmounted(() => {
 
 watch(() => zoneStore.noFlyZones, () => { renderZones() })
 watch(() => zoneStore.heightLimitZones, () => { renderZones() })
+watch(() => mapStore.routeDataList, (routes) => {
+  if (routes?.length && mapStore.map) {
+    setTimeout(() => drawRoutes(routes), 300)
+  }
+}, { immediate: false })
 
 // ── 规划路径绘制 ──────────────────────────────
 let planPathLines = []

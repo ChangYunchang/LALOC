@@ -471,8 +471,8 @@ def compute_altitude_profile(
         ).fetchone()[0]
 
         if table_exists:
-            # 采样路径点（每隔5个点取一个），大幅减少查询次数
-            sample_indices = list(range(0, n, max(1, n // 40)))
+            # 全采样路径点，确保不遗漏任何建筑
+            sample_indices = list(range(0, n))  # 每个点采样，确保不遗漏建筑
             for idx in sample_indices:
                 lng, lat = path[idx]
                 # 单次查询：获取该点所在建筑的最高高度
@@ -546,8 +546,11 @@ def plan_path(
     end_lng: float, end_lat: float,
     waypoints: list[tuple[float, float]] = None,
     cell_size_meters: float = 50,
+    drone_speed: float = 15.0,
+    safety_margin: float = 50.0,
+    avoid_buildings: bool = True,
     consider_weather: bool = True,
-    include_buildings_in_grid: bool = False,  # 建筑数据量大，建网格时默认跳过
+    include_buildings_in_grid: bool = False,
 ) -> dict:
     """
     完整路径规划
@@ -600,20 +603,21 @@ def plan_path(
         if segment_path is None:
             warnings.append(f"路径段 {i+1} 无法规划（可能存在不可绕过的禁飞区）")
             is_feasible = False
-            # 尝试用直线连接
             full_path.append(seg_start)
             full_path.append(seg_end)
         else:
-            # 避免重复点
             if full_path and full_path[-1] == segment_path[0]:
                 full_path.extend(segment_path[1:])
             else:
                 full_path.extend(segment_path)
+            # 强制段终点对齐到精确途经点坐标
+            if full_path:
+                full_path[-1] = seg_end
 
-    # 修复起止点偏移：确保路径首尾点为精确的起止坐标
+    # 确保路径首尾点为精确坐标
     if full_path:
-        full_path[0] = (start_lng, start_lat)
-        full_path[-1] = (end_lng, end_lat)
+        full_path[0] = all_points[0]
+        full_path[-1] = all_points[-1]
 
     # 计算总距离和时间
     total_distance = 0
@@ -629,11 +633,10 @@ def plan_path(
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         total_distance += R * c
 
-    drone_speed = 15.0  # 默认速度
-    estimated_time = total_distance / drone_speed
+    estimated_time = total_distance / drone_speed if drone_speed > 0 else total_distance / 15.0
 
     # 计算高度剖面（考虑限高区和建筑物高度）
-    altitude_profile = compute_altitude_profile(db, full_path)
+    altitude_profile = compute_altitude_profile(db, full_path, building_safety_margin=safety_margin)
 
     return {
         "path": [

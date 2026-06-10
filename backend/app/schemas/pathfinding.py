@@ -19,6 +19,7 @@ class PathPlanRequest(BaseModel):
     safety_margin: Optional[float] = Field(50.0, description="安全距离(米)")
     avoid_no_fly: Optional[bool] = Field(True, description="避开禁飞区")
     avoid_height_limit: Optional[bool] = Field(True, description="避开限高区")
+    avoid_buildings: Optional[bool] = Field(True, description="避开建筑物")
     consider_weather: Optional[bool] = Field(True, description="考虑天气因素")
 
 

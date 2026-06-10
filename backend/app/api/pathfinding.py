@@ -28,6 +28,9 @@ def plan_path(request: PathPlanRequest, db: Session = Depends(get_db)):
             end_lat=request.end.lat,
             waypoints=waypoints if waypoints else None,
             cell_size_meters=200,
+            drone_speed=request.drone_speed or 15.0,
+            safety_margin=request.safety_margin or 50.0,
+            avoid_buildings=request.avoid_buildings if request.avoid_buildings is not None else True,
             consider_weather=request.consider_weather,
         )
 
