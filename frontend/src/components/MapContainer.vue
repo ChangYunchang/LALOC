@@ -61,9 +61,13 @@ defineExpose({
   drawRoutes: (...args) => getActive()?.drawRoutes(...args),
   highlightRoute: (...args) => getActive()?.highlightRoute(...args),
   resetRouteHighlight: (...args) => getActive()?.resetRouteHighlight(...args),
-  setDronePosition: (...args) => getActive()?.setDronePosition(...args),
-  pauseDrone: (...args) => getActive()?.pauseDrone(...args),
-  resumeDrone: (...args) => getActive()?.resumeDrone(...args),
+  setDronePosition: (...args) => {
+    const active = getActive()
+    if (!active) console.warn('MapContainer.setDronePosition: no active child')
+    else active.setDronePosition(...args)
+  },
+  pauseDrone: (...args) => { const a = getActive(); if (a) a.pauseDrone(...args) },
+  resumeDrone: (...args) => { const a = getActive(); if (a) a.resumeDrone(...args) },
   getViewMode: () => viewMode.value,
   addClickHandler: (...args) => getActive()?.addClickHandler(...args),
   removeClickHandler: (...args) => getActive()?.removeClickHandler(...args),

@@ -53,10 +53,6 @@
           <span>无人机速度</span>
           <el-slider v-model="droneSpeed" :min="5" :max="30" :step="1" show-input input-size="small" />
         </div>
-        <div class="param-item">
-          <span>安全距离</span>
-          <el-slider v-model="safetyMargin" :min="10" :max="200" :step="10" show-input input-size="small" />
-        </div>
         <div class="param-item"><el-checkbox v-model="avoidNoFly">避开禁飞区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidHeightLimit">避开限高区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
@@ -113,7 +109,6 @@ const endPoint = ref(null)
 const waypoints = ref([])
 
 const droneSpeed = ref(15)
-const safetyMargin = ref(50)
 const avoidNoFly = ref(true)
 const avoidHeightLimit = ref(true)
 const avoidBuildings = ref(true)
@@ -235,7 +230,6 @@ async function doPlan() {
       end: { ...endPoint.value, alt: 100 },
       waypoints: wpCoords.map(c => ({ ...c, alt: 100 })),
       drone_speed: droneSpeed.value,
-      safety_margin: safetyMargin.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
       avoid_buildings: avoidBuildings.value,

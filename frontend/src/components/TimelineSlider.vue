@@ -226,9 +226,13 @@ watch(() => props.selectedRoute, (newRoute, oldRoute) => {
   pausePlayback()
   progressPercent.value = 0
 
-  // 如果取消选中，恢复之前的航线循环动画
+  // 恢复旧航线的动画循环
   if (oldRoute && props.mapRef) {
     props.mapRef.resumeDrone(oldRoute.id)
+  }
+  // 暂停新选中航线的动画循环（避免覆盖时间轴位置）
+  if (newRoute && props.mapRef) {
+    props.mapRef.pauseDrone(newRoute.id)
   }
 })
 

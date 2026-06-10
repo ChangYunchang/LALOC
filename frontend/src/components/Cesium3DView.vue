@@ -597,16 +597,14 @@ function setDronePosition(routeId, progress) {
   const alt = alt1 + (alt2 - alt1) * frac
 
   droneEntity.position = Cesium.Cartesian3.fromDegrees(lng, lat, alt)
-  // 时间轴控制时镜头跟随无人机
+
+  // 镜头锁定无人机 — 禁用按需渲染 + 用 lookAt 跟随
   if (viewer && !viewer.isDestroyed()) {
-    viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(lng, lat, alt + 1500),
-      orientation: {
-        heading: viewer.camera.heading,
-        pitch: Cesium.Math.toRadians(-35),
-      },
-      duration: 0,
-    })
+    viewer.scene.requestRenderMode = false
+    viewer.scene.camera.lookAt(
+      Cesium.Cartesian3.fromDegrees(lng, lat, alt),
+      new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 2000)
+    )
   }
 }
 
