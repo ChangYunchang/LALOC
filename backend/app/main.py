@@ -16,16 +16,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     print(f"{settings.APP_NAME} v{settings.APP_VERSION} starting...")
     print(f"API docs: http://localhost:8000/docs")
-
-    # 启动时自动导入禁飞区和限高区数据
-    try:
-        from app.utils.shp_loader import import_all_data
-        print("正在导入禁飞区和限高区数据...")
-        import_all_data()
-        print("数据导入完成")
-    except Exception as e:
-        print(f"[警告] 数据导入失败（可手动导入）: {e}")
-
+    # SHP 数据已在首次启动时导入，跳过重复导入
     yield
 
 

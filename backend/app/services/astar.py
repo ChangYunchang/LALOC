@@ -1,9 +1,10 @@
 """
-A* 路径规划算法 —— 考虑禁飞区、限高区、天气约束
+A* 路径规划算法 —— 考虑禁飞区、限高区、建筑物、天气约束
 
 将广州市区域网格化，每个网格节点记录：
-- 是否可通行（禁飞区 = 不可通行）
+- 是否可通行（禁飞区/建筑 = 不可通行）
 - 限高区的最大飞行高度
+- 建筑物的高度（需爬升越过）
 - 通过代价（距离 + 约束惩罚）
 """
 import heapq
@@ -13,6 +14,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.models.zones import NoFlyZone, HeightLimitZone
+from app.models.buildings import Building
 
 
 @dataclass(frozen=True)
@@ -56,8 +58,12 @@ class GridMap:
         self.rows = max(1, int(lat_range / self.cell_size_deg))
         self.cols = max(1, int(lng_range / self.cell_size_deg))
 
-        # 不可达标记
+        # 不可达标记 (禁飞区)
         self.blocked: set[tuple[int, int]] = set()  # (row, col)
+        # 建筑物阻塞 (地面层不可通行，需爬升越过)
+        self.building_blocked: set[tuple[int, int]] = set()  # (row, col)
+        # 建筑物高度: {(row, col): height_meters}
+        self.building_heights: dict[tuple[int, int], float] = {}
         # 限高区信息: {(row, col): max_altitude}
         self.height_limits: dict[tuple[int, int], float] = {}
 
@@ -122,12 +128,13 @@ def build_grid_from_db(
     db: Session,
     min_lng: float = 113.1, max_lng: float = 113.6,
     min_lat: float = 22.8, max_lat: float = 23.4,
-    cell_size_meters: float = 200,
+    cell_size_meters: float = 50,
+    include_buildings: bool = False,  # 默认关闭—45k建筑建网格太慢，改用高度剖面检查
 ) -> GridMap:
-    """从数据库中的禁飞区/限高区构建网格地图"""
+    """从数据库中的禁飞区/限高区/建筑物构建网格地图"""
     grid = GridMap(min_lng, max_lng, min_lat, max_lat, cell_size_meters)
 
-    # 查询禁飞区并标记不可通行网格
+    # ── 1. 禁飞区 → 完全阻塞 ─────────────────
     no_fly_zones = db.query(NoFlyZone).all()
     for zone in no_fly_zones:
         # 获取禁飞区的几何边界
@@ -204,6 +211,100 @@ def build_grid_from_db(
                     if existing is None or zone.max_altitude < existing:
                         grid.height_limits[key] = zone.max_altitude
 
+    # ── 3. 建筑物 → 高度记录（高效批量空间查询）────
+    if include_buildings:
+        try:
+            table_exists = db.execute(
+                text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'buildings')")
+            ).fetchone()[0]
+
+            if table_exists:
+                # 获取该区域所有高层建筑（>=20m），用一次 SQL 查询
+                print("  查询建筑数据 (高度>=20m)...")
+                tall_buildings = db.query(Building).filter(
+                    text("""
+                        (height >= 20 OR (levels >= 7 AND height IS NULL) OR (height IS NULL AND levels IS NULL))
+                        AND geometry && ST_MakeEnvelope(:xmin, :ymin, :xmax, :ymax, 4326)
+                    """),
+                    {"xmin": min_lng, "ymin": min_lat, "xmax": max_lng, "ymax": max_lat}
+                ).limit(3000).all()
+
+                print(f"  覆盖 {len(tall_buildings)} 栋建筑")
+
+                # 对每个网格单元，批量查询是否在建筑内
+                building_cells = 0
+                processed_cells = set()
+
+                for building in tall_buildings:
+                    bh = building.effective_height
+                    if bh < 15:
+                        continue  # 低于15m不影响飞行
+
+                    # 使用建筑边界框快速填充网格
+                    bbox = db.execute(
+                        text("""
+                            SELECT ST_XMin(geometry), ST_YMin(geometry),
+                                   ST_XMax(geometry), ST_YMax(geometry)
+                            FROM buildings WHERE id = :id
+                        """),
+                        {"id": building.id}
+                    ).fetchone()
+                    if not bbox:
+                        continue
+
+                    xmin, ymin, xmax, ymax = bbox
+                    min_cell = grid.lnglat_to_cell(xmin, ymin)
+                    max_cell = grid.lnglat_to_cell(xmax, ymax)
+                    dx = max(1, max_cell.col - min_cell.col + 1)
+                    dy = max(1, max_cell.row - min_cell.row + 1)
+
+                    # 小建筑直接按边界框填充，大建筑才逐格检查
+                    if dx * dy <= 9:  # <= 3x3 cells
+                        for row in range(min_cell.row, min(min_cell.row + dy, grid.rows)):
+                            for col in range(min_cell.col, min(min_cell.col + dx, grid.cols)):
+                                key = (row, col)
+                                if key in processed_cells:
+                                    existing_h = grid.building_heights.get(key, 0)
+                                    if bh > existing_h:
+                                        grid.building_heights[key] = bh
+                                else:
+                                    grid.building_blocked.add(key)
+                                    grid.building_heights[key] = bh
+                                    processed_cells.add(key)
+                                    building_cells += 1
+                    # 大建筑才做精确的 ST_Contains 查询
+                    else:
+                        for r_offset in range(min(dy, 10)):
+                            row = min_cell.row + r_offset
+                            for c_offset in range(min(dx, 10)):
+                                col = min_cell.col + c_offset
+                                cell = GridCell(row, col)
+                                if not grid.is_valid(cell):
+                                    continue
+                                key = (row, col)
+                                if key in processed_cells:
+                                    existing_h = grid.building_heights.get(key, 0)
+                                    if bh > existing_h:
+                                        grid.building_heights[key] = bh
+                                    continue
+                                lng, lat = grid.cell_to_lnglat(row, col)
+                                result = db.execute(
+                                    text("""
+                                        SELECT 1 FROM buildings WHERE id = :id
+                                        AND ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
+                                    """),
+                                    {"lng": lng, "lat": lat, "id": building.id}
+                                ).fetchone()
+                                if result:
+                                    grid.building_blocked.add(key)
+                                    grid.building_heights[key] = bh
+                                    processed_cells.add(key)
+                                    building_cells += 1
+
+                print(f"  建筑覆盖网格: {building_cells} 个")
+        except Exception as e:
+            print(f"  [提示] 建筑数据不可用: {e}")
+
     return grid
 
 
@@ -276,6 +377,10 @@ def astar_search(
             height_limit = grid.height_limits.get(nkey)
             if height_limit is not None and height_limit < 50:
                 move_cost *= 2  # 限高很低的区域增加代价
+            # 建筑物惩罚：高于巡航高度的建筑增加代价
+            building_h = grid.building_heights.get(nkey, 0)
+            if building_h > 100:  # 超过巡航高度
+                move_cost *= (1 + building_h / 200)  # 越高代价越大
 
             new_g = current.g_cost + move_cost
 
@@ -301,14 +406,16 @@ def compute_altitude_profile(
     cruise_alt: float = 100.0,
     takeoff_alt: float = 0.0,
     landing_alt: float = 30.0,
+    building_safety_margin: float = 20.0,
 ) -> list[dict]:
     """
-    为路径计算高度剖面，考虑限高区和建筑物高度。
+    为路径计算高度剖面，考虑限高区、建筑物高度。
 
     高度策略：
     - 起飞段（前 5%）：从地面爬升至巡航高度
-    - 巡航段：保持巡航高度
-    - 限高区段：降至限高区内允许的最大高度，进入前开始下降，离开后爬升
+    - 巡航段：保持巡航高度（但在建筑上方时爬升越过）
+    - 限高区段：降至限高区内允许的最大高度
+    - 建筑区段：爬升至建筑高度 + 安全余量上方
     - 降落段（最后 5%）：从巡航高度降至降落高度
 
     返回: [{"alt": 高度, "phase": 飞行阶段}, ...]
@@ -317,14 +424,14 @@ def compute_altitude_profile(
         return [{"alt": cruise_alt, "phase": "cruise"}] * len(path)
 
     n = len(path)
+    SAFETY = building_safety_margin
 
-    # 查询所有限高区，获取路径可能经过的限高区信息
+    # ── 1. 查询限高区 ────────────────────────
     height_limit_zones = db.query(HeightLimitZone).all()
-    zone_info = []  # [(zone_id, max_altitude, geometry_wkt)]
+    zone_info = []
 
     for zone in height_limit_zones:
-        # 检查路径是否有任何点在该限高区内
-        for lng, lat in path[::max(1, n // 20)]:  # 采样检查，提高性能
+        for lng, lat in path[::max(1, n // 20)]:
             result = db.execute(
                 text("""
                     SELECT ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
@@ -333,13 +440,9 @@ def compute_altitude_profile(
                 {"lng": lng, "lat": lat, "id": zone.id}
             ).fetchone()
             if result and result[0]:
-                zone_info.append({
-                    "id": zone.id,
-                    "max_altitude": zone.max_altitude,
-                })
+                zone_info.append({"id": zone.id, "max_altitude": zone.max_altitude})
                 break
 
-    # 对每个路径点，精确检查是否在限高区内
     in_height_limit = [False] * n
     min_height_limit = [cruise_alt] * n
 
@@ -359,40 +462,73 @@ def compute_altitude_profile(
                     in_height_limit[i] = True
                     min_height_limit[i] = min(min_height_limit[i], zone["max_altitude"])
 
-    # 计算高度剖面
+    # ── 2. 查询建筑物（高效：采样路径点，单次SQL聚合查询）────
+    building_height_at_point = [0.0] * n
+
+    try:
+        table_exists = db.execute(
+            text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'buildings')")
+        ).fetchone()[0]
+
+        if table_exists:
+            # 采样路径点（每隔5个点取一个），大幅减少查询次数
+            sample_indices = list(range(0, n, max(1, n // 40)))
+            for idx in sample_indices:
+                lng, lat = path[idx]
+                # 单次查询：获取该点所在建筑的最高高度
+                result = db.execute(
+                    text("""
+                        SELECT MAX(COALESCE(height, levels * 3.0, 10))
+                        FROM buildings
+                        WHERE ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
+                        AND (height >= 15 OR levels >= 5 OR (height IS NULL AND levels IS NULL))
+                    """),
+                    {"lng": lng, "lat": lat}
+                ).fetchone()
+
+                if result and result[0] and result[0] > 0:
+                    # 将建筑高度应用到该采样点及其附近的点
+                    for j in range(max(0, idx - 2), min(n, idx + 3)):
+                        building_height_at_point[j] = max(
+                            building_height_at_point[j],
+                            float(result[0])
+                        )
+    except Exception as e:
+        print(f"  [提示] 建筑高度查询跳过: {e}")
+
+    # ── 3. 计算高度剖面 ──────────────────────
     profile = []
-    # 起飞/降落段最少 3 个点，占路径比例 5%~15%（路径越短比例越大）
     min_phase_points = 3
     takeoff_pct = max(0.05, min(0.15, min_phase_points / max(n, 1)))
     landing_pct = max(0.05, min(0.15, min_phase_points / max(n, 1)))
-    takeoff_end = max(1, int(n * takeoff_pct))    # 起飞段结束索引
-    landing_start = max(takeoff_end + 1, min(n - 2, n - int(n * landing_pct)))  # 降落段开始索引
+    takeoff_end = max(1, int(n * takeoff_pct))
+    landing_start = max(takeoff_end + 1, min(n - 2, n - int(n * landing_pct)))
 
     for i in range(n):
         if i <= takeoff_end:
-            # 起飞爬升段
             t = i / takeoff_end
             alt = takeoff_alt + (cruise_alt - takeoff_alt) * t
             phase = "ascent"
         elif i >= landing_start:
-            # 降落下降段
             t = (i - landing_start) / max(1, (n - 1 - landing_start))
             alt = cruise_alt + (landing_alt - cruise_alt) * t
             phase = "descent"
         elif in_height_limit[i]:
-            # 限高区段
             target_alt = min(cruise_alt, min_height_limit[i])
-            # 平滑过渡到限高高度
             alt = target_alt
             phase = "height_limit"
+        elif building_height_at_point[i] > 0:
+            # 建筑上方：爬升到建筑高度 + 安全余量
+            target_alt = max(cruise_alt, building_height_at_point[i] + SAFETY)
+            alt = target_alt
+            phase = "building"
         else:
-            # 巡航段
             alt = cruise_alt
             phase = "cruise"
 
         profile.append({"alt": round(alt, 1), "phase": phase})
 
-    # 平滑处理：避免高度突变（限高区进入/退出的过渡）
+    # ── 4. 平滑处理 ──────────────────────────
     for i in range(1, n - 1):
         if profile[i]["phase"] == "height_limit" and profile[i - 1]["phase"] == "cruise":
             # 进入限高区：开始下降
@@ -409,8 +545,9 @@ def plan_path(
     start_lng: float, start_lat: float,
     end_lng: float, end_lat: float,
     waypoints: list[tuple[float, float]] = None,
-    cell_size_meters: float = 200,
+    cell_size_meters: float = 50,
     consider_weather: bool = True,
+    include_buildings_in_grid: bool = False,  # 建筑数据量大，建网格时默认跳过
 ) -> dict:
     """
     完整路径规划

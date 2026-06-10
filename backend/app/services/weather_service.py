@@ -1,6 +1,6 @@
 """天气查询服务 - 代理高德天气 API"""
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models.drones import WeatherRecord
 from app.config import get_settings
@@ -45,7 +45,7 @@ async def get_live_weather(db: Session, city: str = "广州") -> dict:
 
     # 如果缓存不超过30分钟，直接返回
     if latest:
-        age = (datetime.now() - latest.created_at).total_seconds()
+        age = (datetime.utcnow() - latest.created_at).total_seconds()
         if age < 1800:  # 30分钟
             return {
                 "city": latest.city,
@@ -61,7 +61,7 @@ async def get_live_weather(db: Session, city: str = "广州") -> dict:
     # 从高德 API 获取实时天气
     try:
         data = await fetch_weather_from_amap(city=GUANGZHOU_AD_CODE, extensions="base")
-        lives = data.get("live", [])
+        lives = data.get("lives", [])
         if not lives:
             raise Exception("无实时天气数据")
 
@@ -75,7 +75,8 @@ async def get_live_weather(db: Session, city: str = "广州") -> dict:
             wind_direction=live.get("winddirection", ""),
             wind_power=live.get("windpower", ""),
             weather_desc=live.get("weather", ""),
-            report_time=datetime.now(),
+            report_time=datetime.utcnow(),
+            created_at=datetime.utcnow(),
         )
         db.add(record)
         db.commit()
@@ -87,7 +88,7 @@ async def get_live_weather(db: Session, city: str = "广州") -> dict:
             "wind_direction": live.get("winddirection", ""),
             "wind_power": live.get("windpower", ""),
             "weather": live.get("weather", ""),
-            "report_time": datetime.now().isoformat(),
+            "report_time": datetime.utcnow().isoformat(),
             "cached": False,
         }
     except Exception as e:

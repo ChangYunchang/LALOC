@@ -5,8 +5,11 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export const useMapStore = defineStore('map', () => {
-  // 地图实例
+  // Amap 地图实例
   const map = ref(null)
+
+  // Cesium Viewer 实例（3D 模式）
+  const cesiumViewer = ref(null)
 
   // AMap 类引用（供其他组件使用）
   let AMap = null
@@ -42,6 +45,10 @@ export const useMapStore = defineStore('map', () => {
     map.value = mapInstance
   }
 
+  function setCesiumViewer(viewerInstance) {
+    cesiumViewer.value = viewerInstance
+  }
+
   function toggleViewMode() {
     viewMode.value = viewMode.value === '2D' ? '3D' : '2D'
   }
@@ -74,6 +81,7 @@ export const useMapStore = defineStore('map', () => {
 
   return {
     map,
+    cesiumViewer,
     AMap,
     viewMode,
     loading,
@@ -87,6 +95,7 @@ export const useMapStore = defineStore('map', () => {
     selectedRouteId,
     droneMarkers,
     setMap,
+    setCesiumViewer,
     toggleViewMode,
     clearAllOverlays,
     clearRouteOverlays,
