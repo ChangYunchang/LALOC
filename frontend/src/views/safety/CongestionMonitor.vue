@@ -63,13 +63,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
-import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
+import * as echarts from 'echarts'
 import PageLayout from '@/components/PageLayout.vue'
-
-echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const LEVEL_LABELS = { normal: '正常', mild: '轻度', moderate: '中度', severe: '严重' }
 const LEVEL_TYPES = { normal: 'success', mild: 'info', moderate: 'warning', severe: 'danger' }

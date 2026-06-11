@@ -24,7 +24,7 @@
           @mouseleave="closeMenu"
         >
           <span class="nav-dropdown-trigger">
-            <el-icon><component :is="menu.icon" /></el-icon>
+            <el-icon><component :is="iconMap[menu.icon]" /></el-icon>
             {{ menu.label }}
             <el-icon class="arrow"><ArrowDown /></el-icon>
           </span>
@@ -68,6 +68,8 @@ const currentTime = ref('')
 const activeMenu = ref(null)
 let timer = null
 let closeTimer = null
+
+const iconMap = { Guide, MapLocation, ArrowDown, Sunny, Van, Warning, DataAnalysis, FolderOpened, Setting }
 
 const dropdownMenus = [
   {
@@ -249,7 +251,7 @@ onUnmounted(() => {
   gap: 2px;
   margin-left: 24px;
   flex: 1;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* 普通导航链接 */
