@@ -13,6 +13,7 @@
     "@element-plus/icons-vue": "^2.3.0",
     "axios": "^1.7.0",
     "cesium": "^1.121.1",
+    "echarts": "^6.1.0",
     "element-plus": "^2.8.0",
     "pinia": "^2.2.0",
     "vite-plugin-cesium": "^1.2.23",

@@ -6,16 +6,43 @@
         <span class="logo">🚁</span>
         <h1 class="app-title">城市低空物流运营中心</h1>
       </div>
+
       <nav class="header-nav">
+        <!-- 态势监控 -->
         <router-link to="/dashboard" class="nav-link" active-class="active">
           <el-icon><Monitor /></el-icon>
           态势大屏
         </router-link>
-        <router-link to="/path-planning" class="nav-link" active-class="active">
-          <el-icon><MapLocation /></el-icon>
-          路径规划
-        </router-link>
+
+        <!-- 下拉菜单：各子系统 -->
+        <div
+          v-for="menu in dropdownMenus"
+          :key="menu.label"
+          class="nav-dropdown"
+          :class="{ active: isMenuActive(menu) }"
+          @mouseenter="openMenu(menu.label)"
+          @mouseleave="closeMenu"
+        >
+          <span class="nav-dropdown-trigger">
+            <el-icon><component :is="menu.icon" /></el-icon>
+            {{ menu.label }}
+            <el-icon class="arrow"><ArrowDown /></el-icon>
+          </span>
+          <div v-if="activeMenu === menu.label" class="dropdown-panel">
+            <router-link
+              v-for="item in menu.children"
+              :key="item.path"
+              :to="item.path"
+              class="dropdown-item"
+              active-class="active"
+              @click="closeMenu"
+            >
+              {{ item.label }}
+            </router-link>
+          </div>
+        </div>
       </nav>
+
       <div class="header-right">
         <span class="current-time">{{ currentTime }}</span>
       </div>
@@ -30,10 +57,129 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { Monitor, MapLocation } from '@element-plus/icons-vue'
+import { useRoute } from 'vue-router'
+import {
+  Monitor, MapLocation, ArrowDown, Guide, Sunny, Van,
+  Warning, DataAnalysis, FolderOpened, Setting,
+} from '@element-plus/icons-vue'
 
+const route = useRoute()
 const currentTime = ref('')
+const activeMenu = ref(null)
 let timer = null
+let closeTimer = null
+
+const dropdownMenus = [
+  {
+    label: '空域管理',
+    icon: 'Guide',
+    paths: ['/airspace'],
+    children: [
+      { path: '/airspace/zones', label: '空域规则管理' },
+      { path: '/airspace/query', label: '空域空间查询' },
+      { path: '/airspace/compliance', label: '航线合规审查' },
+      { path: '/airspace/stats', label: '空域资源统计' },
+    ],
+  },
+  {
+    label: '航路规划',
+    icon: 'MapLocation',
+    paths: ['/path-planning', '/emergency-routing'],
+    children: [
+      { path: '/path-planning', label: '智能路径规划' },
+      { path: '/emergency-routing', label: '应急航路规划' },
+    ],
+  },
+  {
+    label: '气象保障',
+    icon: 'Sunny',
+    paths: ['/weather'],
+    children: [
+      { path: '/weather', label: '实时气象监测' },
+      { path: '/weather/forecast', label: '气象预报查询' },
+      { path: '/weather/alerts', label: '气象风险预警' },
+    ],
+  },
+  {
+    label: '物流运营',
+    icon: 'Van',
+    paths: ['/logistics'],
+    children: [
+      { path: '/logistics/orders', label: '配送订单管理' },
+      { path: '/logistics/tasks', label: '配送任务管理' },
+      { path: '/logistics/stations', label: '配送站管理' },
+      { path: '/logistics/drones', label: '无人机资源管理' },
+      { path: '/logistics/scheduling', label: '无人机任务调度' },
+    ],
+  },
+  {
+    label: '安全监管',
+    icon: 'Warning',
+    paths: ['/safety', '/enterprise-monitor'],
+    children: [
+      { path: '/enterprise-monitor', label: '企业运行监管' },
+      { path: '/safety/conflict', label: '航线冲突检测' },
+      { path: '/safety/congestion', label: '低空拥堵识别' },
+      { path: '/safety/risk-heatmap', label: '安全风险热力' },
+      { path: '/safety/events', label: '异常事件管理' },
+      { path: '/safety/records', label: '安全监管台账' },
+    ],
+  },
+  {
+    label: '统计决策',
+    icon: 'DataAnalysis',
+    paths: ['/statistics'],
+    children: [
+      { path: '/statistics/city', label: '城市运行统计' },
+      { path: '/statistics/enterprise', label: '企业运营效率' },
+      { path: '/statistics/service', label: '服务质量分析' },
+      { path: '/statistics/cost', label: '能耗成本分析' },
+      { path: '/statistics/layout', label: '配送站布局分析' },
+    ],
+  },
+  {
+    label: '数据资源',
+    icon: 'FolderOpened',
+    paths: ['/data'],
+    children: [
+      { path: '/data/gis-layers', label: 'GIS图层管理' },
+      { path: '/data/buildings', label: '三维建筑数据' },
+      { path: '/data/external-sources', label: '外部数据源管理' },
+      { path: '/data/quality-check', label: '数据更新质检' },
+    ],
+  },
+  {
+    label: '系统管理',
+    icon: 'Setting',
+    paths: ['/system'],
+    children: [
+      { path: '/system/users', label: '用户管理' },
+      { path: '/system/roles', label: '角色权限管理' },
+      { path: '/system/enterprises', label: '企业信息管理' },
+      { path: '/system/params', label: '系统参数配置' },
+      { path: '/system/logs', label: '日志审计' },
+      { path: '/system/service-status', label: '服务状态监测' },
+    ],
+  },
+]
+
+function isMenuActive(menu) {
+  return menu.paths.some(p => route.path.startsWith(p))
+}
+
+function openMenu(label) {
+  if (closeTimer) {
+    clearTimeout(closeTimer)
+    closeTimer = null
+  }
+  activeMenu.value = label
+}
+
+function closeMenu() {
+  closeTimer = setTimeout(() => {
+    activeMenu.value = null
+  }, 150)
+}
 
 function updateTime() {
   const now = new Date()
@@ -54,6 +200,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (timer) clearInterval(timer)
+  if (closeTimer) clearTimeout(closeTimer)
 })
 </script>
 
@@ -72,15 +219,17 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
-  padding: 0 24px;
+  padding: 0 16px;
   z-index: 1000;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  flex-shrink: 0;
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .logo {
@@ -88,27 +237,34 @@ onUnmounted(() => {
 }
 
 .app-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .header-nav {
   display: flex;
-  gap: 4px;
-  margin-left: 48px;
+  align-items: center;
+  gap: 2px;
+  margin-left: 24px;
+  flex: 1;
+  overflow: hidden;
 }
 
+/* 普通导航链接 */
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
+  gap: 5px;
+  padding: 5px 12px;
   border-radius: 6px;
   color: var(--text-secondary);
   text-decoration: none;
-  font-size: 14px;
+  font-size: 13px;
+  white-space: nowrap;
   transition: all 0.2s;
+  cursor: pointer;
 }
 
 .nav-link:hover {
@@ -122,14 +278,85 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
+/* 下拉菜单容器 */
+.nav-dropdown {
+  position: relative;
+}
+
+.nav-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.nav-dropdown-trigger:hover,
+.nav-dropdown.active .nav-dropdown-trigger {
+  color: var(--accent-blue);
+  background: #eff6ff;
+}
+
+.nav-dropdown.active .nav-dropdown-trigger {
+  font-weight: 500;
+}
+
+.arrow {
+  font-size: 11px;
+  transition: transform 0.2s;
+}
+
+/* 下拉面板 */
+.dropdown-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 140px;
+  background: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  padding: 4px 0;
+  z-index: 2000;
+}
+
+.dropdown-item {
+  display: block;
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.dropdown-item:hover {
+  color: var(--text-primary);
+  background: #f9fafb;
+}
+
+.dropdown-item.active {
+  color: var(--accent-blue);
+  background: #eff6ff;
+  font-weight: 500;
+}
+
 .header-right {
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .current-time {
   font-size: 13px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .app-main {
