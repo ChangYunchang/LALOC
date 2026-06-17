@@ -38,7 +38,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 import Amap2DView from './Amap2DView.vue'
 import Cesium3DView from './Cesium3DView.vue'
 import ZoneLegend from './ZoneLegend.vue'
@@ -47,20 +47,52 @@ const viewMode = ref('2D')
 const amap2DRef = ref(null)
 const cesium3DRef = ref(null)
 
-function switchMode(mode) {
-  viewMode.value = mode
-}
+// 缓存最后一次 drawRoutes 的参数，切换模式后重新绘制
+let _lastRoutes = null
+let _lastHighlightId = null
 
-// ── 暴露统一接口，转发到当前激活的子组件 ──────
 function getActive() {
   return viewMode.value === '2D' ? amap2DRef.value : cesium3DRef.value
 }
 
+function switchMode(mode) {
+  if (viewMode.value === mode) return
+  viewMode.value = mode
+  // v-if 会销毁并重建组件，新实例挂载后重新绘制
+  nextTick(() => {
+    setTimeout(() => {
+      const active = getActive()
+      if (!active) return
+      if (_lastRoutes) active.drawRoutes(_lastRoutes)
+      if (_lastHighlightId != null) active.highlightRoute(_lastHighlightId)
+    }, 800) // 等待地图初始化
+  })
+}
+
+// 监听 amap2DRef 就绪（防止 ref 异步赋值）
+watch(amap2DRef, (newRef) => {
+  if (newRef && _lastRoutes) {
+    setTimeout(() => {
+      newRef.drawRoutes?.(_lastRoutes)
+      if (_lastHighlightId != null) newRef.highlightRoute?.(_lastHighlightId)
+    }, 1200)
+  }
+})
+
 defineExpose({
-  viewMode,  // 暴露响应式 viewMode 供父组件监听
-  drawRoutes: (...args) => getActive()?.drawRoutes(...args),
-  highlightRoute: (...args) => getActive()?.highlightRoute(...args),
-  resetRouteHighlight: (...args) => getActive()?.resetRouteHighlight(...args),
+  viewMode,
+  drawRoutes: (...args) => {
+    _lastRoutes = args[0]   // 缓存航线数据
+    getActive()?.drawRoutes(...args)
+  },
+  highlightRoute: (...args) => {
+    _lastHighlightId = args[0]
+    getActive()?.highlightRoute(...args)
+  },
+  resetRouteHighlight: (...args) => {
+    _lastHighlightId = null
+    getActive()?.resetRouteHighlight(...args)
+  },
   setDronePosition: (...args) => {
     const active = getActive()
     if (!active) console.warn('MapContainer.setDronePosition: no active child')
