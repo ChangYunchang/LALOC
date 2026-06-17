@@ -320,6 +320,63 @@ function clearRouteEntities() {
   routeEntities = {}
 }
 
+// 采样建筑+地形高度，将路线整体抬升至障碍物上方
+// clearance: 离建筑顶部的最小净空(米)
+async function liftRouteAboveScene(coordsList, altProfile, clearance = 50) {
+  const MIN_AGL = 80  // 即使没有障碍，也保持最低离地高度
+
+  // 先用地形采样（快速）确保不钻地
+  let terrainHeights = coordsList.map(() => 0)
+  try {
+    const terrainProvider = viewer.terrainProvider
+    if (terrainProvider && !(terrainProvider instanceof Cesium.EllipsoidTerrainProvider)) {
+      const cartos = coordsList.map(c => Cesium.Cartographic.fromDegrees(c[0], c[1]))
+      const sampled = await Cesium.sampleTerrainMostDetailed(terrainProvider, cartos)
+      terrainHeights = sampled.map(c => c.height || 0)
+    }
+  } catch {}
+
+  // 再用场景采样（含建筑白模，较慢，按需）
+  const positions = coordsList.map((c, i) => {
+    const agl = (altProfile?.[i]?.alt ?? MIN_AGL)
+    const terrainBase = terrainHeights[i]
+    return Cesium.Cartesian3.fromDegrees(c[0], c[1], terrainBase + agl)
+  })
+
+  // 场景高度采样：取建筑顶部最高点，保证路线在其上方
+  try {
+    const cartosForScene = coordsList.map(c => Cesium.Cartographic.fromDegrees(c[0], c[1]))
+    const sceneResult = await viewer.scene.sampleHeightMostDetailed(cartosForScene)
+    sceneResult.forEach((carto, i) => {
+      if (carto.height != null && carto.height > 0) {
+        const agl = altProfile?.[i]?.alt ?? MIN_AGL
+        // 路线高度 = max(建筑顶部 + 净空, 地形 + 期望AGL)
+        const finalAlt = Math.max(carto.height + clearance, terrainHeights[i] + agl)
+        positions[i] = Cesium.Cartesian3.fromDegrees(
+          Cesium.Math.toDegrees(carto.longitude),
+          Cesium.Math.toDegrees(carto.latitude),
+          finalAlt
+        )
+      }
+    })
+  } catch {}
+
+  return positions
+}
+
+// 给 entity 中所有 polyline 设置新 positions（异步更新用）
+function updatePolylinePositions(polylines, newPositions) {
+  let offset = 0
+  polylines.forEach(pl => {
+    if (!pl.polyline?.positions) return
+    const len = pl.polyline.positions.getValue(Cesium.JulianDate.now())?.length ?? 0
+    if (len > 0) {
+      pl.polyline.positions = new Cesium.ConstantProperty(newPositions.slice(offset, offset + len))
+      offset += len
+    }
+  })
+}
+
 function drawRoutes(routes) {
   if (!viewer) return
   lastRoutesData = routes
@@ -334,11 +391,16 @@ function drawRoutes(routes) {
     const altProfile = route.altitude_profile
     const polylines = []
 
-    // 使用实际高度值
+    // 初始位置：地形高度 + AGL（异步采样完成后会更新）
+    const MIN_AGL = 80
     const positions = coords.map((c, i) => {
-      const alt = altProfile && altProfile[i] ? altProfile[i].alt : 100
-      return Cesium.Cartesian3.fromDegrees(c[0], c[1], alt)
+      const agl = altProfile?.[i]?.alt ?? MIN_AGL
+      return Cesium.Cartesian3.fromDegrees(c[0], c[1], agl)
     })
+
+    // depthFailMaterial：当路线被建筑遮挡时，以虚线半透明方式穿透显示，避免完全不可见
+    const makeDepthFail = (color) =>
+      new Cesium.PolylineDashMaterialProperty({ color: color.withAlpha(0.45), dashLength: 12 })
 
     if (altProfile && altProfile.length === coords.length) {
       const boundaries = [0]
@@ -360,8 +422,9 @@ function drawRoutes(routes) {
               width: 4,
               material: new Cesium.PolylineDashMaterialProperty({
                 color: isLast ? color : color.withAlpha(0.8),
-                dashLength: isLast ? 0 : 16, // 只有最后一段不显示虚线（表示方向）
+                dashLength: isLast ? 0 : 16,
               }),
+              depthFailMaterial: makeDepthFail(color),
               clampToGround: false,
             },
           })
@@ -374,16 +437,17 @@ function drawRoutes(routes) {
           positions,
           width: 4,
           material: COL.normal,
+          depthFailMaterial: makeDepthFail(COL.normal),
           clampToGround: false,
         },
       })
       polylines.push(polyline)
     }
 
-    // 起终点标记 — 使用航线首尾高度，与航线连接
-    const startAlt = altProfile && altProfile[0] ? altProfile[0].alt : 100
+    // 起终点标记
+    const startAlt = altProfile?.[0]?.alt ?? MIN_AGL
     const endAltIdx = coords.length - 1
-    const endAlt = altProfile && altProfile[endAltIdx] ? altProfile[endAltIdx].alt : 100
+    const endAlt = altProfile?.[endAltIdx]?.alt ?? MIN_AGL
 
     const startEntity = viewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(coords[0][0], coords[0][1], startAlt),
@@ -446,6 +510,34 @@ function drawRoutes(routes) {
       progress: 0,
       route,
     }
+
+    // 异步采样建筑高度，完成后更新路线位置到建筑上方
+    liftRouteAboveScene(coords, altProfile).then(liftedPositions => {
+      if (!viewer || viewer.isDestroyed()) return
+      if (!routeEntities[route.id]) return  // 已被清除
+      // 更新路线折线位置
+      let offset = 0
+      polylines.forEach(pl => {
+        if (!pl.polyline?.positions) return
+        const cur = pl.polyline.positions.getValue(Cesium.JulianDate.now())
+        const len = cur?.length ?? 0
+        if (len > 0 && offset + len <= liftedPositions.length) {
+          pl.polyline.positions = new Cesium.ConstantProperty(liftedPositions.slice(offset, offset + len))
+          offset += len
+        }
+      })
+      // 更新动画的基础位置
+      if (routeAnimState[route.id]) {
+        routeAnimState[route.id].positions = liftedPositions
+      }
+      // 更新起终点标记高度
+      const startPos = liftedPositions[0]
+      const endPos = liftedPositions[liftedPositions.length - 1]
+      if (startPos) startEntity.position = new Cesium.ConstantPositionProperty(startPos)
+      if (endPos) endEntity.position = new Cesium.ConstantPositionProperty(endPos)
+      if (startPos) droneEntity.position = new Cesium.ConstantPositionProperty(startPos)
+      viewer.scene.requestRender()
+    }).catch(() => {}) // 采样失败时保留初始位置
   })
 
   startGlobalLoop()
