@@ -4,8 +4,12 @@
   核心算法复用后端 A* 路径规划，额外添加"绕避动态禁区"参数
 -->
 <template>
-  <PageLayout title="应急航路规划" subtitle="当常规航路受阻时，快速规划绕避动态障碍的应急飞行路径">
-    <el-row :gutter="20">
+  <div class="emergency-routing-page">
+    <div class="page-header">
+      <h2 class="page-title">应急航路规划</h2>
+      <span class="page-subtitle">当常规航路受阻时，快速规划绕避动态障碍的应急飞行路径</span>
+    </div>
+    <el-row :gutter="20" class="page-body">
       <!-- 左侧参数面板 -->
       <el-col :span="8">
         <el-card header="应急路径参数" style="margin-bottom:16px">
@@ -112,7 +116,7 @@
         </el-card>
       </el-col>
     </el-row>
-  </PageLayout>
+  </div>
 </template>
 
 <script setup>
@@ -120,7 +124,6 @@ import { ref, reactive, computed } from 'vue'
 import { Warning, Location } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
-import PageLayout from '@/components/PageLayout.vue'
 
 const REASONS = [
   { value: 'nfz_expand', label: '禁飞区临时扩展' },
@@ -222,6 +225,11 @@ function downloadRoute() {
 }
 </script>
 <style scoped>
+.emergency-routing-page { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.page-header { padding: 14px 20px 0; flex-shrink: 0; }
+.page-title { font-size: 16px; font-weight: 700; color: #111827; margin: 0 0 2px; }
+.page-subtitle { font-size: 12px; color: #9ca3af; }
+.page-body { flex: 1; overflow-y: auto; padding: 14px 20px 20px; }
 .empty-map { min-height: 320px; display: flex; align-items: center; justify-content: center; background: #f9fafb; border-radius: 6px; }
 .map-placeholder { width: 100%; }
 </style>

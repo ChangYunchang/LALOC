@@ -3,6 +3,71 @@ import vue from '@vitejs/plugin-vue'
 import { resolve, join } from 'path'
 import { existsSync, readFileSync, statSync } from 'fs'
 
+// ── Mock API 数据（无需启动后端即可预览）─────────────────────────────────────
+const MOCK_WEATHER = {
+  city: '广州', temperature: '28', humidity: '72',
+  wind_direction: '东南', wind_power: '3', weather: '多云',
+  report_time: new Date().toISOString().replace('T', ' ').slice(0, 19), cached: false,
+}
+
+// 真实禁飞区/限高区数据（从 data/*.shp 转换而来，存放在 public/geo/）
+const GEO_DIR = resolve(__dirname, 'public/geo')
+const MOCK_NO_FLY_ZONES = existsSync(join(GEO_DIR, 'nofly_zones.geojson'))
+  ? JSON.parse(readFileSync(join(GEO_DIR, 'nofly_zones.geojson'), 'utf-8'))
+  : { type: 'FeatureCollection', features: [] }
+const MOCK_HEIGHT_LIMIT_ZONES = existsSync(join(GEO_DIR, 'height_limit_zones.geojson'))
+  ? JSON.parse(readFileSync(join(GEO_DIR, 'height_limit_zones.geojson'), 'utf-8'))
+  : { type: 'FeatureCollection', features: [] }
+
+const MOCK_ZONE_STATS = {
+  no_fly_zones_count: MOCK_NO_FLY_ZONES.features.length,
+  height_limit_zones_count: MOCK_HEIGHT_LIMIT_ZONES.features.length,
+}
+
+const MOCK_ROUTES = [
+  { id: 1, name: '天河→番禺干线', status: 'active', total_distance: 18.5, estimated_time: 22,
+    waypoints: [{ lng: 113.3245, lat: 23.1201, alt: 120 }, { lng: 113.3100, lat: 23.0800, alt: 120 }, { lng: 113.2994, lat: 23.0500, alt: 100 }],
+    route_line: { type: 'LineString', coordinates: [[113.3245,23.1201],[113.3100,23.0800],[113.2994,23.0500]] },
+    created_at: new Date().toISOString() },
+  { id: 2, name: '白云→荔湾横线', status: 'active', total_distance: 12.3, estimated_time: 15,
+    waypoints: [{ lng: 113.2994, lat: 23.1540, alt: 100 }, { lng: 113.2800, lat: 23.1380, alt: 100 }, { lng: 113.2500, lat: 23.1050, alt: 100 }],
+    route_line: { type: 'LineString', coordinates: [[113.2994,23.1540],[113.2800,23.1380],[113.2500,23.1050]] },
+    created_at: new Date().toISOString() },
+  { id: 3, name: '黄埔→天河东线', status: 'standby', total_distance: 15.8, estimated_time: 19,
+    waypoints: [{ lng: 113.4500, lat: 23.1100, alt: 120 }, { lng: 113.3900, lat: 23.1200, alt: 120 }, { lng: 113.3400, lat: 23.1201, alt: 120 }],
+    route_line: { type: 'LineString', coordinates: [[113.4500,23.1100],[113.3900,23.1200],[113.3400,23.1201]] },
+    created_at: new Date().toISOString() },
+]
+
+// Vite 插件：拦截 /api 请求返回 Mock 数据（无需后端）
+function mockApiPlugin() {
+  const MOCK_MAP = {
+    'GET /api/weather/live': MOCK_WEATHER,
+    'GET /api/zones/no-fly': MOCK_NO_FLY_ZONES,
+    'GET /api/zones/height-limit': MOCK_HEIGHT_LIMIT_ZONES,
+    'GET /api/zones/stats': MOCK_ZONE_STATS,
+    'GET /api/routes/': MOCK_ROUTES,
+    'GET /api/routes': MOCK_ROUTES,
+  }
+  return {
+    name: 'mock-api',
+    configureServer(server) {
+      server.middlewares.use('/api', (req, res, next) => {
+        const key = `${req.method} /api${req.url?.split('?')[0] || ''}`
+        const data = MOCK_MAP[key]
+        if (data !== undefined) {
+          res.setHeader('Content-Type', 'application/json')
+          res.setHeader('Access-Control-Allow-Origin', '*')
+          res.statusCode = 200
+          res.end(JSON.stringify(data))
+          return
+        }
+        next()
+      })
+    },
+  }
+}
+
 const CESIUM_DIR = resolve(__dirname, 'node_modules/cesium/Build/Cesium')
 
 // 插件：在 dev 模式直接 serve Cesium 静态资源，build 时复制到 dist
@@ -50,6 +115,7 @@ export default defineConfig({
   plugins: [
     vue(),
     cesiumServe(),
+    mockApiPlugin(),
   ],
   resolve: {
     alias: {
@@ -59,12 +125,6 @@ export default defineConfig({
   server: {
     port: 5173,
     host: '0.0.0.0',
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8001',
-        changeOrigin: true,
-      },
-    },
   },
   build: {
     rollupOptions: {
