@@ -37,7 +37,8 @@ export const useMapStore = defineStore('map', () => {
 
   // 航线相关
   const routeLines = ref([])      // 航线 Polyline
-  const routeDataList = ref([])   // 航线数据
+  const routeDataList = ref([])   // 航线数据（来自后端 API）
+  const savedRoutes = ref([])     // 本地规划并保存的航线（跨页面共享）
   const selectedRouteId = ref(null) // 当前选中的航线 ID
   const droneMarkers = ref([])    // 无人机标记
 
@@ -79,6 +80,10 @@ export const useMapStore = defineStore('map', () => {
     }
   }
 
+  function addSavedRoute(route) {
+    savedRoutes.value.push(route)
+  }
+
   return {
     map,
     cesiumViewer,
@@ -92,6 +97,7 @@ export const useMapStore = defineStore('map', () => {
     heightLimitPolygons,
     routeLines,
     routeDataList,
+    savedRoutes,
     selectedRouteId,
     droneMarkers,
     setMap,
@@ -99,5 +105,6 @@ export const useMapStore = defineStore('map', () => {
     toggleViewMode,
     clearAllOverlays,
     clearRouteOverlays,
+    addSavedRoute,
   }
 })

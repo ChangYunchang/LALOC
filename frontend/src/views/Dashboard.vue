@@ -86,7 +86,7 @@
     <div class="map-area">
       <MapContainer ref="mapContainerRef" />
 
-      <div class="timeline-wrapper">
+      <div v-if="selectedRoute" class="timeline-wrapper">
         <TimelineSlider
           :selected-route="selectedRoute"
           :map-ref="mapContainerRef"
@@ -98,7 +98,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useZoneStore } from '@/stores/zones'
 import { useMapStore } from '@/stores/map'
 import { getAllRoutes } from '@/api/routes'
@@ -108,7 +108,8 @@ import TimelineSlider from '@/components/TimelineSlider.vue'
 
 const zoneStore = useZoneStore()
 const mapStore = useMapStore()
-const routes = ref([])
+const apiRoutes = ref([])
+const routes = computed(() => [...apiRoutes.value, ...mapStore.savedRoutes])
 const selectedRoute = ref(null)
 const mapContainerRef = ref(null)
 
@@ -120,18 +121,26 @@ const statusMap = {
 
 onMounted(async () => {
   try {
-    routes.value = await getAllRoutes()
+    apiRoutes.value = await getAllRoutes()
     mapStore.routeDataList = routes.value
 
-    // 等待地图组件加载完成后绘制航线
     await nextTick()
     setTimeout(() => {
       if (mapContainerRef.value && routes.value.length > 0) {
         mapContainerRef.value.drawRoutes(routes.value)
       }
-    }, 1500) // 等待地图初始化
+    }, 1500)
   } catch (e) {
     console.log('航线数据加载失败（可能是首次运行）')
+  }
+})
+
+// 新保存的航线实时同步到地图
+watch(() => mapStore.savedRoutes.length, async () => {
+  mapStore.routeDataList = routes.value
+  await nextTick()
+  if (mapContainerRef.value && routes.value.length > 0) {
+    mapContainerRef.value.drawRoutes(routes.value)
   }
 })
 

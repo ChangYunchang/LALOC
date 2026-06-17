@@ -83,7 +83,43 @@
           <div v-for="(w, i) in planResult.warnings" :key="i" class="warning-item">⚠️ {{ w }}</div>
         </div>
       </div>
+
+      <el-button
+        v-if="planResult?.is_feasible"
+        type="success"
+        size="large"
+        style="width:100%"
+        @click="openSaveDialog"
+      >
+        💾 保存航线
+      </el-button>
     </aside>
+
+    <!-- 保存航线弹窗 -->
+    <el-dialog v-model="saveDialogVisible" title="保存航线信息" width="440px" append-to-body>
+      <el-form :model="saveForm" label-width="80px">
+        <el-form-item label="航线名称" required>
+          <el-input v-model="saveForm.name" placeholder="请输入航线名称" />
+        </el-form-item>
+        <el-form-item label="所属企业" required>
+          <el-input v-model="saveForm.enterprise" placeholder="请输入企业名称" />
+        </el-form-item>
+        <el-form-item label="负责人" required>
+          <el-input v-model="saveForm.person" placeholder="请输入负责人姓名" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="saveForm.notes" type="textarea" :rows="2" placeholder="可选备注" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="saveDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!saveForm.name || !saveForm.enterprise || !saveForm.person"
+          @click="confirmSaveRoute"
+        >确认保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 地图区 — 使用统一的 MapContainer 组件 -->
     <div class="map-area">
@@ -94,13 +130,57 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, reactive, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
 import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
+import { useMapStore } from '@/stores/map'
 
+const mapStore = useMapStore()
 const mapContainerRef = ref(null)
+
+// ── 保存航线弹窗 ──────────────────────────────
+const saveDialogVisible = ref(false)
+const saveForm = reactive({ name: '', enterprise: '', person: '', notes: '' })
+
+function openSaveDialog() {
+  if (!planResult.value?.is_feasible) return
+  const start = startPoint.value
+  saveForm.name = start ? `${start.lng.toFixed(3)},${start.lat.toFixed(3)} → 规划航线` : '新规划航线'
+  saveForm.enterprise = ''
+  saveForm.person = ''
+  saveForm.notes = ''
+  saveDialogVisible.value = true
+}
+
+function confirmSaveRoute() {
+  if (!saveForm.name || !saveForm.enterprise || !saveForm.person) {
+    ElMessage.warning('请填写完整信息')
+    return
+  }
+  const r = planResult.value
+  const route = {
+    id: Date.now(),
+    name: saveForm.name,
+    enterprise: saveForm.enterprise,
+    responsible_person: saveForm.person,
+    notes: saveForm.notes,
+    status: 'planned',
+    total_distance: r.total_distance,
+    estimated_time: r.estimated_time,
+    waypoints: r.path || [],
+    route_line: {
+      type: 'LineString',
+      coordinates: (r.path || []).map(p => [p.lng, p.lat]),
+    },
+    altitude_profile: r.altitude_profile || [],
+    created_at: new Date().toISOString(),
+  }
+  mapStore.addSavedRoute(route)
+  saveDialogVisible.value = false
+  ElMessage.success('航线已保存至态势大屏航线列表')
+}
 
 const startInput = ref('')
 const endInput = ref('')
