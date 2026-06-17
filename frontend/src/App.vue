@@ -59,8 +59,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  Monitor, MapLocation, ArrowDown, Guide, Sunny, Van,
-  Warning, DataAnalysis, FolderOpened, Setting,
+  Monitor, MapLocation, ArrowDown, Lock, TrendCharts,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -69,20 +68,17 @@ const activeMenu = ref(null)
 let timer = null
 let closeTimer = null
 
-const iconMap = { Guide, MapLocation, ArrowDown, Sunny, Van, Warning, DataAnalysis, FolderOpened, Setting }
+const iconMap = { MapLocation, Lock, TrendCharts }
 
+/**
+ * 顶部导航下拉菜单配置
+ * 严格对应 Structure.md 中的 4 个 GIS 子系统：
+ *   1. 态势大屏（直接链接）
+ *   2. 智能航路规划（下拉）
+ *   3. 无人机安全缓冲区分析（下拉）
+ *   4. 低空密度等值线分析（下拉）
+ */
 const dropdownMenus = [
-  {
-    label: '空域管理',
-    icon: 'Guide',
-    paths: ['/airspace'],
-    children: [
-      { path: '/airspace/zones', label: '空域规则管理' },
-      { path: '/airspace/query', label: '空域空间查询' },
-      { path: '/airspace/compliance', label: '航线合规审查' },
-      { path: '/airspace/stats', label: '空域资源统计' },
-    ],
-  },
   {
     label: '航路规划',
     icon: 'MapLocation',
@@ -93,74 +89,22 @@ const dropdownMenus = [
     ],
   },
   {
-    label: '气象保障',
-    icon: 'Sunny',
-    paths: ['/weather'],
+    label: '安全缓冲分析',
+    icon: 'Lock',
+    paths: ['/safety-buffer'],
     children: [
-      { path: '/weather', label: '实时气象监测' },
-      { path: '/weather/forecast', label: '气象预报查询' },
-      { path: '/weather/alerts', label: '气象风险预警' },
+      { path: '/safety-buffer/config', label: '安全范围配置' },
+      { path: '/safety-buffer/overlap', label: '缓冲区重叠分析' },
     ],
   },
   {
-    label: '物流运营',
-    icon: 'Van',
-    paths: ['/logistics'],
+    label: '安全热力分析',
+    icon: 'TrendCharts',
+    paths: ['/density'],
     children: [
-      { path: '/logistics/orders', label: '配送订单管理' },
-      { path: '/logistics/tasks', label: '配送任务管理' },
-      { path: '/logistics/stations', label: '配送站管理' },
-      { path: '/logistics/drones', label: '无人机资源管理' },
-      { path: '/logistics/scheduling', label: '无人机任务调度' },
-    ],
-  },
-  {
-    label: '安全监管',
-    icon: 'Warning',
-    paths: ['/safety', '/enterprise-monitor'],
-    children: [
-      { path: '/enterprise-monitor', label: '企业运行监管' },
-      { path: '/safety/conflict', label: '航线冲突检测' },
-      { path: '/safety/congestion', label: '低空拥堵识别' },
-      { path: '/safety/risk-heatmap', label: '安全风险热力' },
-      { path: '/safety/events', label: '异常事件管理' },
-      { path: '/safety/records', label: '安全监管台账' },
-    ],
-  },
-  {
-    label: '统计决策',
-    icon: 'DataAnalysis',
-    paths: ['/statistics'],
-    children: [
-      { path: '/statistics/city', label: '城市运行统计' },
-      { path: '/statistics/enterprise', label: '企业运营效率' },
-      { path: '/statistics/service', label: '服务质量分析' },
-      { path: '/statistics/cost', label: '能耗成本分析' },
-      { path: '/statistics/layout', label: '配送站布局分析' },
-    ],
-  },
-  {
-    label: '数据资源',
-    icon: 'FolderOpened',
-    paths: ['/data'],
-    children: [
-      { path: '/data/gis-layers', label: 'GIS图层管理' },
-      { path: '/data/buildings', label: '三维建筑数据' },
-      { path: '/data/external-sources', label: '外部数据源管理' },
-      { path: '/data/quality-check', label: '数据更新质检' },
-    ],
-  },
-  {
-    label: '系统管理',
-    icon: 'Setting',
-    paths: ['/system'],
-    children: [
-      { path: '/system/users', label: '用户管理' },
-      { path: '/system/roles', label: '角色权限管理' },
-      { path: '/system/enterprises', label: '企业信息管理' },
-      { path: '/system/params', label: '系统参数配置' },
-      { path: '/system/logs', label: '日志审计' },
-      { path: '/system/service-status', label: '服务状态监测' },
+      { path: '/density/contour', label: '安全风险热力分析' },
+      { path: '/density/hotspot', label: '低空拥堵识别' },
+      { path: '/density/stats', label: '区域密度统计' },
     ],
   },
 ]
