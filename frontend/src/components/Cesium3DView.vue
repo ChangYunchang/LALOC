@@ -689,38 +689,99 @@ function _dilateMax(arr, w) {
   return r
 }
 
-// ── 轻量垂直校正：用真实 OSM 建筑高度一次性采样，防穿模（不改横向） ──
-// 水平绕行已在服务端基于真实禁飞区多边形完成；此处仅对最终航迹点采样一次，
-// 若某处真实建筑高于航线则平滑抬升（膨胀成平台 + 均值平滑，杜绝针尖）。
-async function liftForBuildings(points, profile) {
+// 数组均值平滑（带符号，用于横向偏移缓入缓出），保留首尾
+function _smoothSeq(arr, w) {
+  const r = arr.slice()
+  for (let i = 1; i < arr.length - 1; i++) {
+    let s = 0, c = 0
+    for (let k = -w; k <= w; k++) { const j = i + k; if (j >= 0 && j < arr.length) { s += arr[j]; c++ } }
+    r[i] = s / c
+  }
+  return r
+}
+
+// ── 穿模检测与航线校正：用真实 OSM 建筑高度逐点采样 ──────────────
+// 核心问题：服务端按高斯模型水平绕行，但真实 OSM 建筑轮廓不一致，航线仍可能穿模。
+// 解决：① 采样真实建筑高度，找出穿模点（建筑高于航线高度）；
+//      ② 高于限高的建筑 → 横向偏移绕开（在垂直航向方向逐级试探，批量采样验证）；
+//      ③ 低于限高/横向无解的残余穿模 → 垂直抬升兜底（绝不留穿模），缓入缓出成平滑弧。
+async function correctForBuildings(points, profile, ceiling = Infinity) {
   if (!viewer?.scene?.sampleHeightMostDetailed || points.length < 2) return null
-
-  // 点数过多时降采样，控制单次采样规模（远比逐点多候选快）
   const n = points.length
-  const carto = points.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
-  let sampled
-  try {
-    sampled = await viewer.scene.sampleHeightMostDetailed(carto)
-  } catch {
-    return null
-  }
-  const buildH = sampled.map(c => (c && c.height > 0 ? c.height : 0))
-  if (!buildH.some(h => h > 0)) return null  // 建筑未就绪/无遮挡 → 保留服务端航迹
+  const MARGIN = 15            // 垂直安全余量（米）
+  const OFFSETS = [40, 80, 130, 190, 260, 340]  // 横向试探距离（米）
+  const MPD = 111320
 
-  const CLEAR = 18
-  const baseAlt = profile.map(p => p.alt)
-  const need = baseAlt.map((a, i) => Math.max(a, buildH[i] + CLEAR))
-  let alt = _dilateMax(need, 2)   // 抬升段扩成平台
-  alt = _smooth(alt, 2)           // 平滑成缓坡
-  // 起降段保留原始斜坡
-  for (let i = 0; i < n; i++) {
-    if (profile[i].phase === 'ascent' || profile[i].phase === 'descent') alt[i] = baseAlt[i]
+  const sampleH = async (pts) => {
+    try {
+      const carto = pts.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
+      const s = await viewer.scene.sampleHeightMostDetailed(carto)
+      return s.map(c => (c && c.height > 0 ? c.height : 0))
+    } catch { return null }
   }
-  return profile.map((p, i) => ({
-    ...p,
-    alt: Math.round(alt[i]),
-    phase: (alt[i] > baseAlt[i] + 5 && p.phase === 'cruise') ? 'building' : p.phase,
-  }))
+
+  const baseAlt = profile.map(p => p.alt)
+  const buildH = await sampleH(points)
+  if (!buildH || !buildH.some(h => h > 0)) return null  // 建筑瓦片未就绪 → 保留服务端航迹
+
+  // 可校正的相位（巡航/建筑/禁飞绕行段；起降段保持原样）
+  const adjustable = (i) => profile[i].phase !== 'ascent' && profile[i].phase !== 'descent'
+  // 单位垂直航向向量（经纬度增量），用于横向偏移
+  const perp = (i) => {
+    const a = points[Math.max(0, i - 1)], b = points[Math.min(n - 1, i + 1)]
+    const ml = MPD * Math.cos(points[i].lat * Math.PI / 180)
+    let dx = (b.lng - a.lng) * ml, dy = (b.lat - a.lat) * MPD
+    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L
+    return { lng: -dy / ml, lat: dx / MPD }  // 旋转 90° 后换回经纬度
+  }
+
+  // ① 穿模点：真实建筑高于航线高度 + 余量
+  const pen = buildH.map((h, i) => h > 0 && adjustable(i) && h + MARGIN > baseAlt[i])
+
+  // ② 对"高于限高"的穿模点做横向绕行候选，批量采样验证
+  const cand = []   // { i, signed, lng, lat }
+  for (let i = 0; i < n; i++) {
+    if (!pen[i] || buildH[i] <= ceiling) continue   // 低于限高的留给垂直抬升
+    const pp = perp(i)
+    for (const side of [1, -1]) for (const d of OFFSETS) {
+      cand.push({ i, signed: side * d, lng: points[i].lng + pp.lng * side * d, lat: points[i].lat + pp.lat * side * d })
+    }
+  }
+  const latOff = new Array(n).fill(0)      // 每点横向偏移（米，带符号）
+  if (cand.length) {
+    const candH = await sampleH(cand) || cand.map(() => 9999)
+    const pick = new Map()                  // i → 最小 |偏移| 的可行候选
+    cand.forEach((c, k) => {
+      if (candH[k] + MARGIN < baseAlt[c.i]) {  // 该偏移点航线高度可净空
+        const cur = pick.get(c.i)
+        if (!cur || Math.abs(c.signed) < Math.abs(cur.signed)) pick.set(c.i, c)
+      }
+    })
+    for (const [i, c] of pick) latOff[i] = c.signed
+  }
+  // 横向偏移缓入缓出平滑（避免突兀折角，形成圆润绕行弧）
+  let latS = _smoothSeq(latOff, 3); latS = _smoothSeq(latS, 3)
+
+  const newPts = points.map((p, i) => {
+    if (Math.abs(latS[i]) < 1) return { ...p }
+    const pp = perp(i)
+    return { lng: p.lng + pp.lng * latS[i], lat: p.lat + pp.lat * latS[i], alt: p.alt }
+  })
+
+  // ③ 重新采样校正后航线，对残余穿模（低矮建筑或横向无解）垂直抬升兜底
+  const buildH2 = await sampleH(newPts) || buildH
+  const need = baseAlt.map((a, i) => (adjustable(i) && buildH2[i] > 0) ? Math.max(a, buildH2[i] + MARGIN) : a)
+  let alt = _dilateMax(need, 2)    // 抬升段扩成平台
+  alt = _smooth(alt, 2)            // 平滑成缓坡
+  for (let i = 0; i < n; i++) if (!adjustable(i)) alt[i] = baseAlt[i]  // 起降段保留斜坡
+
+  return newPts.map((p, i) => {
+    const moved = Math.abs(latS[i]) > 2 || alt[i] > baseAlt[i] + 5
+    return {
+      lng: p.lng, lat: p.lat, alt: Math.round(alt[i]), index: i,
+      phase: (moved && adjustable(i)) ? 'building' : profile[i].phase,
+    }
+  })
 }
 
 // 从服务端剖面推断巡航高度
@@ -824,10 +885,11 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   if (!hasProfile || opts.avoidBuildings === false) return
 
   try {
-    const refinedProfile = await liftForBuildings(pathPoints, altitudeProfile)
-    if (!viewer || viewer.isDestroyed() || !refinedProfile) return
+    // 返回的是校正后的航迹点（含横向偏移 + 抬升 + 相位），位置与高度均可能改变
+    const corrected = await correctForBuildings(pathPoints, altitudeProfile, opts.cruiseAlt ?? Infinity)
+    if (!viewer || viewer.isDestroyed() || !corrected) return
     clearPlanPath()
-    _drawPlanPathCore(pathPoints, refinedProfile)
+    _drawPlanPathCore(corrected, corrected)
     viewer.scene.requestRender()
   } catch { /* 采样失败，保留初始绘制 */ }
 }

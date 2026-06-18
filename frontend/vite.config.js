@@ -132,117 +132,7 @@ function pointInPoly(lng, lat, poly) {
   }
   return inside
 }
-// 线段相交判定
-function ccw(a, b, c) { return (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng) }
-function segIntersect(a, b, c, d) {
-  const d1 = ccw(c, d, a), d2 = ccw(c, d, b), d3 = ccw(a, b, c), d4 = ccw(a, b, d)
-  return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))
-}
-// 线段是否穿过多边形（端点在内 或 与任一边相交）
-function segHitsPoly(a, b, poly) {
-  if (Math.max(a.lng, b.lng) < poly.minLng || Math.min(a.lng, b.lng) > poly.maxLng ||
-      Math.max(a.lat, b.lat) < poly.minLat || Math.min(a.lat, b.lat) > poly.maxLat) return false
-  if (pointInPoly(a.lng, a.lat, poly) || pointInPoly(b.lng, b.lat, poly)) return true
-  const p = poly.pts
-  for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
-    if (segIntersect(a, b, p[j], p[i])) return true
-  }
-  return false
-}
-// 凸包（Andrew monotone chain）
-function convexHull(points) {
-  const pts = points.slice().sort((a, b) => a.lng - b.lng || a.lat - b.lat)
-  if (pts.length < 3) return pts
-  const cr = (o, a, b) => (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng)
-  const lo = []
-  for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p) }
-  const up = []
-  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p) }
-  lo.pop(); up.pop()
-  return lo.concat(up)
-}
-// 凸包按质心向外扩张 marginM 米（安全缓冲）
-function bufferHull(hull, marginM) {
-  let cx = 0, cy = 0; for (const p of hull) { cx += p.lng; cy += p.lat } cx /= hull.length; cy /= hull.length
-  return hull.map(p => {
-    const ml = mPerDegLng(p.lat)
-    const dx = (p.lng - cx) * ml, dy = (p.lat - cy) * MPD
-    const d = Math.hypot(dx, dy) || 1
-    return { lng: p.lng + (dx / d) * marginM / ml, lat: p.lat + (dy / d) * marginM / MPD }
-  })
-}
-// 在缓冲凸包的某一侧绕行：返回该侧顶点（按沿 AB 投影排序）
-function detourSide(A, B, hull, side) {
-  const ml = mPerDegLng((A.lat + B.lat) / 2)
-  const abx = (B.lng - A.lng) * ml, aby = (B.lat - A.lat) * MPD
-  const L = Math.hypot(abx, aby) || 1
-  const ux = abx / L, uy = aby / L
-  const px = -uy, py = ux  // 左侧法向
-  const sel = []
-  for (const v of hull) {
-    const vx = (v.lng - A.lng) * ml, vy = (v.lat - A.lat) * MPD
-    const perp = vx * px + vy * py
-    if (side > 0 ? perp > 0 : perp < 0) sel.push({ v, along: vx * ux + vy * uy })
-  }
-  if (!sel.length) return null
-  sel.sort((a, b) => a.along - b.along)
-  return sel.map(o => o.v)
-}
-// 障碍绕行主流程：迭代地为每段插入绕行顶点，直到无穿越或达上限
-function avoidObstacles(ctrl, polys, marginM, maxInsert = 80) {
-  if (!polys.length) return { ctrl, count: 0 }
-  let path = ctrl.slice()
-  let guard = 0, count = 0, i = 0
-  while (i < path.length - 1 && guard < maxInsert) {
-    const A = path[i], B = path[i + 1]
-    let hit = null
-    for (const poly of polys) { if (segHitsPoly(A, B, poly)) { hit = poly; break } }
-    if (!hit) { i++; continue }
-    guard++
-    const hull = bufferHull(convexHull(hit.pts), marginM)
-    const left = detourSide(A, B, hull, +1)
-    const right = detourSide(A, B, hull, -1)
-    const cand = []
-    if (left) cand.push([A, ...left, B])
-    if (right) cand.push([A, ...right, B])
-    if (!cand.length) { i++; continue }
-    const plen = (a) => { let s = 0; for (let k = 0; k < a.length - 1; k++) s += haversine(a[k], a[k + 1]); return s }
-    cand.sort((a, b) => plen(a) - plen(b))
-    path.splice(i, 2, ...cand[0])  // 用 A...绕行点...B 取代原 A,B
-    count++
-    // 不前进 i：复检新子段（可能仍穿过其它禁飞区）
-  }
-  return { ctrl: path, count }
-}
-// 把孤立点推到多边形外侧（样条过冲修正）
-function pushOutOfPoly(pt, poly, stepM) {
-  let p = pt
-  const ml = mPerDegLng(poly.cy)
-  for (let it = 0; it < 8 && pointInPoly(p.lng, p.lat, poly); it++) {
-    const dx = (p.lng - poly.cx) * ml, dy = (p.lat - poly.cy) * MPD
-    const d = Math.hypot(dx, dy) || 1
-    p = { lng: p.lng + (dx / d) * stepM / ml, lat: p.lat + (dy / d) * stepM / MPD }
-  }
-  return p
-}
-// 把高层建筑群（高斯模型）转成阻挡核心八边形，用于统一的水平绕行
-function buildingObstacles(cruiseAlt) {
-  const obs = []
-  const RATIO = 0.85  // 建筑高度 > 巡航 85% 才算挡路（更低的从上方飞过）
-  for (const z of GZ_BUILDINGS) {
-    if (z.maxH <= cruiseAlt * RATIO) continue
-    const blockR = z.r * (1 - (cruiseAlt * RATIO) / z.maxH)
-    if (blockR < 60) continue
-    const pts = []
-    for (let k = 0; k < 8; k++) {
-      const a = k / 8 * 2 * Math.PI
-      pts.push({ lng: z.cx + Math.cos(a) * blockR / mPerDegLng(z.cy), lat: z.cy + Math.sin(a) * blockR / MPD })
-    }
-    obs.push(polyMeta(pts))
-  }
-  return obs
-}
-// 点到多边形最近距离（米）——用于绕行段高亮判定
+// 点到多边形最近距离（米）——用于栅格障碍判定与绕行段高亮
 function distToPoly(lng, lat, poly) {
   let best = Infinity
   const ml = mPerDegLng(lat)
@@ -257,7 +147,38 @@ function distToPoly(lng, lat, poly) {
   return best
 }
 
-// ── Mock 路径规划：Catmull-Rom 曲线 + 建筑避让 + 精细化检验 ─
+// ════════════════════════════════════════════════════════════════════
+// Mock 路径规划：8 方向栅格 A*（航线沿 45° 倍数走向，水平绕开障碍）
+//
+// 设计要点（回归后端最初的栅格 A* 思路）：
+//   · 飞行高度 = 强制飞行限高（hard ceiling），不再是"建议"高度；
+//   · 高于限高的高层建筑群 → 栅格不可通行 → A* 水平绕开（45° 折线）；
+//   · 低于限高的建筑 → 可通行，无人机在限高高度从上方飞过（不再拔尖）；
+//   · 禁飞区（含安全缓冲）→ 永远不可通行，A* 强制绕行。
+// ════════════════════════════════════════════════════════════════════
+
+// 最小二叉堆（A* 开放集）
+class MinHeap {
+  constructor() { this.a = [] }
+  get size() { return this.a.length }
+  push(node) {
+    const a = this.a; a.push(node); let i = a.length - 1
+    while (i > 0) { const p = (i - 1) >> 1; if (a[p].f <= a[i].f) break;[a[p], a[i]] = [a[i], a[p]]; i = p }
+  }
+  pop() {
+    const a = this.a, top = a[0], last = a.pop()
+    if (a.length) { a[0] = last; let i = 0; const n = a.length
+      while (true) { let s = i, l = 2 * i + 1, r = l + 1
+        if (l < n && a[l].f < a[s].f) s = l
+        if (r < n && a[r].f < a[s].f) s = r
+        if (s === i) break;[a[s], a[i]] = [a[i], a[s]]; i = s } }
+    return top
+  }
+}
+
+const NF_MARGIN = 150   // 禁飞区安全缓冲（米）
+const BUILD_RATIO = 1.0 // 建筑高度 > 限高 × 此系数 才算挡路（须绕行）
+
 function mockPlanPath(params) {
   const {
     start, end, waypoints = [], drone_speed = 15,
@@ -267,115 +188,239 @@ function mockPlanPath(params) {
     return { is_feasible: false, warnings: ['缺少起终点'], path: [], altitude_profile: [], total_distance: 0, estimated_time: 0 }
   }
 
-  const CRUISE_ALT = Math.max(Math.min(suggested_alt, 300), 30)
-  const ASCENT_R = 0.12, DESCENT_R = 0.12
+  const CEIL = Math.max(Math.min(suggested_alt, 300), 30)  // 强制飞行限高
+  const doNoFly = avoid_no_fly !== false
+  const doBuild = avoid_buildings !== false
+  const ctrlPts = [start, ...waypoints, end]
 
-  // ── 0. 障碍绕行：禁飞区多边形 + 高层建筑核心，统一凸包水平绕行 ─
-  let ctrl = [start, ...waypoints, end]
-  const usedObstacles = []   // { poly, margin, kind } —— 用于绕行段高亮与样条修正
-  let noFlyDetours = 0, buildingDetours = 0
-
-  if (avoid_no_fly !== false && NO_FLY_POLYS.length) {
-    const r = avoidObstacles(ctrl, NO_FLY_POLYS, 180, 100)  // 禁飞区缓冲 180m
-    ctrl = r.ctrl; noFlyDetours = r.count
-    for (const poly of NO_FLY_POLYS) usedObstacles.push({ poly, margin: 180, kind: 'no_fly' })
+  // ── 0. 起点/途经点/终点落在禁飞区内 → 拒绝规划（任何一点都不行）─
+  if (NO_FLY_POLYS.length) {
+    const labelOf = (i) => i === 0 ? '起点' : i === ctrlPts.length - 1 ? '终点' : `途经点${i}`
+    const blocked_points = []
+    ctrlPts.forEach((p, i) => {
+      for (const poly of NO_FLY_POLYS) {
+        if (p.lng < poly.minLng || p.lng > poly.maxLng || p.lat < poly.minLat || p.lat > poly.maxLat) continue
+        if (pointInPoly(p.lng, p.lat, poly)) {
+          blocked_points.push({ index: i, label: labelOf(i), lng: p.lng, lat: p.lat })
+          break
+        }
+      }
+    })
+    if (blocked_points.length) {
+      const names = blocked_points.map(b => b.label).join('、')
+      return {
+        is_feasible: false,
+        blocked_in_no_fly: true,
+        blocked_points,
+        warnings: [`${names} 位于禁飞区内，无法规划航线，请重新选择点位`],
+        path: [], altitude_profile: [], total_distance: 0, estimated_time: 0,
+      }
+    }
   }
-  if (avoid_buildings !== false) {
-    const bObs = buildingObstacles(CRUISE_ALT)
-    const r = avoidObstacles(ctrl, bObs, 80, 100)  // 建筑缓冲 80m
-    ctrl = r.ctrl; buildingDetours = r.count
-    for (const poly of bObs) usedObstacles.push({ poly, margin: 80, kind: 'building' })
+
+  // ── 1. 构建栅格 ─────────────────────────────────────────
+  let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity
+  for (const p of ctrlPts) {
+    minLng = Math.min(minLng, p.lng); maxLng = Math.max(maxLng, p.lng)
+    minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat)
+  }
+  const buf = 0.03  // 约 3km 搜索缓冲，给绕行留出空间
+  minLng -= buf; maxLng += buf; minLat -= buf; maxLat += buf
+  const latMid = (minLat + maxLat) / 2
+  const mLng = mPerDegLng(latMid)
+  const wM = (maxLng - minLng) * mLng, hM = (maxLat - minLat) * MPD
+  // 目标 ~220 格/边，精度 30~140m（建筑间隙可穿行又不至于太慢）
+  const cellM = Math.max(30, Math.min(140, Math.max(wM, hM) / 220))
+  const cellLat = cellM / MPD
+  const cellLng = cellM / mLng
+  const rows = Math.max(2, Math.ceil((maxLat - minLat) / cellLat))
+  const cols = Math.max(2, Math.ceil((maxLng - minLng) / cellLng))
+
+  const cellCenter = (r, c) => ({ lng: minLng + (c + 0.5) * cellLng, lat: minLat + (r + 0.5) * cellLat })
+  const toCell = (p) => ({
+    r: Math.max(0, Math.min(rows - 1, Math.floor((p.lat - minLat) / cellLat))),
+    c: Math.max(0, Math.min(cols - 1, Math.floor((p.lng - minLng) / cellLng))),
+  })
+
+  // 障碍判定（带缓存）：返回 'no_fly' | 'building' | null
+  const blockCache = new Map()
+  function blockKind(r, c) {
+    const key = r * cols + c
+    const cached = blockCache.get(key)
+    if (cached !== undefined) return cached
+    const { lng, lat } = cellCenter(r, c)
+    let kind = null
+    if (doNoFly) {
+      for (const poly of NO_FLY_POLYS) {
+        if (lng < poly.minLng - 0.02 || lng > poly.maxLng + 0.02 ||
+            lat < poly.minLat - 0.02 || lat > poly.maxLat + 0.02) continue
+        if (pointInPoly(lng, lat, poly) || distToPoly(lng, lat, poly) < NF_MARGIN) { kind = 'no_fly'; break }
+      }
+    }
+    if (!kind && doBuild && getBuildingHeight(lng, lat) > CEIL * BUILD_RATIO) kind = 'building'
+    blockCache.set(key, kind)
+    return kind
   }
 
-  // ── 1. Catmull-Rom 样条 ─
-  const STEPS = 16
-  const ext = [ctrl[0], ...ctrl, ctrl[ctrl.length - 1]]
-  const spline = []
+  // ── 2. 单段 8 方向 A* ──────────────────────────────────
+  function astarSeg(sCell, gCell) {
+    const gKey = gCell.r * cols + gCell.c
+    const octile = (r, c) => {
+      const dr = Math.abs(r - gCell.r), dc = Math.abs(c - gCell.c)
+      return cellM * (Math.max(dr, dc) + (Math.SQRT2 - 1) * Math.min(dr, dc))
+    }
+    const open = new MinHeap()
+    const gScore = new Map(), parent = new Map()
+    const sKey = sCell.r * cols + sCell.c
+    gScore.set(sKey, 0)
+    open.push({ r: sCell.r, c: sCell.c, f: octile(sCell.r, sCell.c) })
+    const closed = new Set()
+    let guard = 0, maxGuard = rows * cols
+    while (open.size && guard++ < maxGuard) {
+      const cur = open.pop()
+      const cKey = cur.r * cols + cur.c
+      if (cKey === gKey) {           // 回溯
+        const cells = []; let k = cKey
+        while (k !== undefined) { cells.push({ r: Math.floor(k / cols), c: k % cols }); k = parent.get(k) }
+        cells.reverse(); return cells
+      }
+      if (closed.has(cKey)) continue
+      closed.add(cKey)
+      const gCur = gScore.get(cKey)
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        if (!dr && !dc) continue
+        const nr = cur.r + dr, nc = cur.c + dc
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue
+        const nKey = nr * cols + nc
+        if (closed.has(nKey)) continue
+        // 起终格永远允许，其余格按障碍判定
+        if (nKey !== gKey && blockKind(nr, nc)) continue
+        if (dr && dc) {  // 防斜穿障碍角
+          if (blockKind(cur.r, nc) || blockKind(nr, cur.c)) continue
+        }
+        const step = (dr && dc) ? cellM * Math.SQRT2 : cellM
+        const ng = gCur + step
+        if (ng < (gScore.get(nKey) ?? Infinity)) {
+          gScore.set(nKey, ng); parent.set(nKey, cKey)
+          open.push({ r: nr, c: nc, f: ng + octile(nr, nc) })
+        }
+      }
+    }
+    return null  // 不可达
+  }
+
+  // ── 3. 逐段规划并拼接 ──────────────────────────────────
+  const warnings = []
+  let isFeasible = true
+  let routeCells = []  // [{r,c}]
+  for (let s = 0; s < ctrlPts.length - 1; s++) {
+    const seg = astarSeg(toCell(ctrlPts[s]), toCell(ctrlPts[s + 1]))
+    if (!seg) {
+      isFeasible = false
+      warnings.push(`路径段 ${s + 1} 无法绕过障碍（可能被禁飞区封闭）`)
+      routeCells.push(toCell(ctrlPts[s]), toCell(ctrlPts[s + 1]))
+      continue
+    }
+    if (routeCells.length && seg.length) seg.shift()  // 去重接缝
+    routeCells = routeCells.concat(seg)
+  }
+
+  // 栅格中心 → 经纬度；首尾对齐精确起终点
+  let poly = routeCells.map(({ r, c }) => cellCenter(r, c))
+  if (poly.length) { poly[0] = { lng: start.lng, lat: start.lat }; poly[poly.length - 1] = { lng: end.lng, lat: end.lat } }
+
+  // 共线点合并（保留干净的 45° 折线）
+  const simplified = []
+  for (let i = 0; i < poly.length; i++) {
+    if (i === 0 || i === poly.length - 1) { simplified.push(poly[i]); continue }
+    const a = poly[i - 1], b = poly[i], cc = poly[i + 1]
+    const cross = (b.lng - a.lng) * (cc.lat - a.lat) - (b.lat - a.lat) * (cc.lng - a.lng)
+    if (Math.abs(cross) > 1e-9) simplified.push(b)
+  }
+  poly = simplified.length >= 2 ? simplified : poly
+
+  // ── 4. Catmull-Rom 样条柔滑：把 45° 折线变成视觉曲线 ─────────
+  // 每段按弧长细分采样数，弧线更圆润；样条采样点若回落进障碍格则向外推出
+  const SAMPLE_M = Math.max(36, cellM)
+  const ext = [poly[0], ...poly, poly[poly.length - 1]]
+  let dense = []
   for (let i = 1; i < ext.length - 2; i++) {
     const p0 = ext[i - 1], p1 = ext[i], p2 = ext[i + 1], p3 = ext[i + 2]
-    for (let k = 0; k < STEPS; k++) {
-      const t = k / STEPS
-      spline.push({
+    const steps = Math.max(2, Math.round(haversine(p1, p2) / SAMPLE_M))
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps
+      dense.push({
         lng: catmullRom(p0.lng, p1.lng, p2.lng, p3.lng, t),
         lat: catmullRom(p0.lat, p1.lat, p2.lat, p3.lat, t),
       })
     }
   }
-  spline.push({ lng: end.lng, lat: end.lat })
-  spline[0] = { lng: start.lng, lat: start.lat }
-  const n = spline.length
+  dense.push({ lng: end.lng, lat: end.lat })
+  dense[0] = { lng: start.lng, lat: start.lat }
 
-  // 样条平滑可能把弧线"剪"回禁飞区内 → 逐点外推修正（硬约束）
-  if (avoid_no_fly !== false) {
-    for (let i = 1; i < n - 1; i++) {
-      for (const o of usedObstacles) {
-        if (o.kind === 'no_fly' && pointInPoly(spline[i].lng, spline[i].lat, o.poly)) {
-          spline[i] = pushOutOfPoly(spline[i], o.poly, o.margin + 40)
-        }
+  // 柔滑可能把弧线"剪"进障碍格 → 逐点推回最近的可通行格（硬约束）
+  const pushOutOfBlocked = (p) => {
+    const cell = toCell(p)
+    if (!blockKind(cell.r, cell.c)) return p
+    for (let rad = 1; rad <= 6; rad++) {
+      let best = null, bestD = Infinity
+      for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
+        if (Math.max(Math.abs(dr), Math.abs(dc)) !== rad) continue
+        const nr = cell.r + dr, nc = cell.c + dc
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue
+        if (blockKind(nr, nc)) continue
+        const cc = cellCenter(nr, nc)
+        const d = (cc.lng - p.lng) ** 2 + (cc.lat - p.lat) ** 2
+        if (d < bestD) { bestD = d; best = cc }
       }
+      if (best) return best
     }
+    return p
   }
+  for (let i = 1; i < dense.length - 1; i++) dense[i] = pushOutOfBlocked(dense[i])
+  const n = dense.length
 
-  // ── 2. 高度剖面：起降斜坡 + 巡航；低矮建筑从上方小幅抬升飞过 ─
-  const rawAlt = spline.map((p, i) => {
+  // ── 5. 高度剖面 + 相位配色 ─────────────────────────────
+  const ASCENT_R = 0.1, DESCENT_R = 0.1
+  let nearNoFly = false, nearBuilding = false
+  const profile = dense.map((p, i) => {
     const t = i / Math.max(n - 1, 1)
     let alt, phase
-    if (t < ASCENT_R) { alt = 20 + (CRUISE_ALT - 20) * (t / ASCENT_R); phase = 'ascent' }
-    else if (t > 1 - DESCENT_R) { alt = 20 + (CRUISE_ALT - 20) * ((1 - t) / DESCENT_R); phase = 'descent' }
-    else { alt = CRUISE_ALT; phase = 'cruise' }
+    if (t < ASCENT_R) { alt = 20 + (CEIL - 20) * (t / ASCENT_R); phase = 'ascent' }
+    else if (t > 1 - DESCENT_R) { alt = 20 + (CEIL - 20) * ((1 - t) / DESCENT_R); phase = 'descent' }
+    else { alt = CEIL; phase = 'cruise' }
 
-    // 巡航段：靠近被绕行的障碍 → 高亮（红=禁飞绕行 / 紫=建筑绕行）
     if (phase === 'cruise') {
-      for (const o of usedObstacles) {
-        if (distToPoly(p.lng, p.lat, o.poly) < o.margin * 1.6) {
-          phase = o.kind === 'no_fly' ? 'no_fly' : 'building'
-          break
+      // 贴近禁飞区缓冲 → 红色绕行段
+      if (doNoFly) {
+        for (const o of NO_FLY_POLYS) {
+          if (p.lng < o.minLng - 0.02 || p.lng > o.maxLng + 0.02 || p.lat < o.minLat - 0.02 || p.lat > o.maxLat + 0.02) continue
+          if (distToPoly(p.lng, p.lat, o) < NF_MARGIN * 1.8) { phase = 'no_fly'; nearNoFly = true; break }
         }
       }
-    }
-
-    // 低矮建筑（未触发水平绕行）从上方小幅抬升飞过
-    if (avoid_buildings !== false && (phase === 'cruise')) {
-      const bh = getBuildingHeight(p.lng, p.lat)
-      const needed = bh * 1.25 + 25
-      if (bh > 0 && alt < needed) alt = needed
+      // 紧贴/飞越高层建筑 → 紫色段
+      if (phase === 'cruise' && doBuild) {
+        const bh = getBuildingHeight(p.lng, p.lat)
+        if (bh > CEIL * 0.55) { phase = 'building'; nearBuilding = true }
+      }
     }
     return { alt: Math.round(alt), phase }
   })
 
-  // ── 3. 高度平滑：膨胀消除孤立尖点 + 均值平滑（杜绝针尖）─
-  const altArr = rawAlt.map(r => r.alt)
-  const dil = altArr.map((_, i) => {
-    let m = altArr[i]
-    for (let k = -2; k <= 2; k++) { const j = i + k; if (j >= 0 && j < n) m = Math.max(m, altArr[j]) }
-    return m
-  })
-  const sm = dil.map((_, i) => {
-    let s = 0, c = 0
-    for (let k = -2; k <= 2; k++) { const j = i + k; if (j >= 0 && j < n) { s += dil[j]; c++ } }
-    return Math.round(s / c)
-  })
-  // 起降段保留原始斜坡
-  for (let i = 0; i < n; i++) {
-    if (rawAlt[i].phase === 'ascent' || rawAlt[i].phase === 'descent') sm[i] = rawAlt[i].alt
-  }
+  const path = dense.map((p, idx) => ({ lng: p.lng, lat: p.lat, alt: profile[idx].alt, index: idx }))
+  const altitude_profile = profile.map((r, idx) => ({ index: idx, alt: r.alt, phase: r.phase }))
 
-  const path = spline.map((p, idx) => ({ lng: p.lng, lat: p.lat, alt: sm[idx], index: idx }))
-  const altitude_profile = spline.map((p, idx) => ({ index: idx, alt: sm[idx], phase: rawAlt[idx].phase }))
-
-  // ── 4. 统计 ─
+  // ── 6. 统计与提示 ──────────────────────────────────────
   let total_distance = 0
-  for (let i = 0; i < ctrl.length - 1; i++) total_distance += haversine(ctrl[i], ctrl[i + 1])
-  total_distance = Math.round(total_distance * 1.05)
+  for (let i = 0; i < dense.length - 1; i++) total_distance += haversine(dense[i], dense[i + 1])
+  total_distance = Math.round(total_distance)
   const estimated_time = Math.round(total_distance / (drone_speed * 1000 / 3600))
 
-  const warnings = []
-  if (noFlyDetours > 0) warnings.push(`已水平绕行 ${noFlyDetours} 处禁飞区（保持安全缓冲距离）`)
-  if (buildingDetours > 0) warnings.push(`已水平绕行 ${buildingDetours} 处高层建筑群（保持建议高度 ${CRUISE_ALT}m）`)
-  const maxAlt = Math.max(...altitude_profile.map(p => p.alt))
-  if (maxAlt > 200) warnings.push(`最高飞行高度 ${maxAlt}m，请确认已获得空域授权`)
+  if (nearNoFly) warnings.push('已水平绕行禁飞区（保持安全缓冲距离）')
+  if (nearBuilding) warnings.push(`已水平绕行高于限高的高层建筑群（强制飞行限高 ${CEIL}m）`)
+  if (CEIL > 200) warnings.push(`飞行限高 ${CEIL}m，请确认已获得空域授权`)
 
-  return { is_feasible: true, total_distance, estimated_time, warnings, path, altitude_profile }
+  return { is_feasible: isFeasible, total_distance, estimated_time, warnings, path, altitude_profile }
 }
 
 // Vite 插件：拦截 /api 请求返回 Mock 数据（无需后端）

@@ -58,8 +58,8 @@
         <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
         <div v-if="avoidBuildings" class="param-item param-item--indent">
           <div class="param-label-row">
-            <span>建议飞行高度</span>
-            <span class="param-hint">低于此高度的建筑物从上方穿越，高层建筑群优先水平绕行</span>
+            <span>强制飞行限高</span>
+            <span class="param-hint">低于限高的建筑从上方飞越；高于限高的建筑群强制水平绕行（不会超过此高度）</span>
           </div>
           <div class="slider-row">
             <el-slider v-model="suggestedAlt" :min="50" :max="250" :step="10" show-input input-size="small" />
@@ -149,7 +149,7 @@
 
 <script setup>
 import { ref, reactive, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
 import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
@@ -343,6 +343,19 @@ async function doPlan() {
       avoid_buildings: avoidBuildings.value,
       consider_weather: considerWeather.value,
     })
+    // 起点/途经点/终点落在禁飞区内 → 拒绝规划并弹窗提示
+    if (result.blocked_in_no_fly) {
+      planResult.value = null
+      clearOldPath()
+      mapContainerRef.value?.clearPlanPath?.()
+      const names = (result.blocked_points || []).map(b => b.label).join('、')
+      ElMessageBox.alert(
+        `${names || '部分点位'} 位于禁飞区内，无法为其规划航线。请将该点移出禁飞区后重试。`,
+        '无法规划航线',
+        { type: 'error', confirmButtonText: '我知道了' }
+      )
+      return
+    }
     planResult.value = result
     drawRouteOnMap(result.path, result.altitude_profile)
     ElMessage.success('路径规划完成')
