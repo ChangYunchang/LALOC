@@ -73,6 +73,14 @@
         🚁 开始路径规划
       </el-button>
 
+      <div v-if="planProgress !== null" class="plan-progress">
+        <div class="plan-progress-label">
+          <span>{{ planProgressLabel || '计算真实建筑绕行航线' }}</span>
+          <span>{{ planProgress }}%</span>
+        </div>
+        <el-progress :percentage="planProgress" :stroke-width="10" :show-text="false" status="success" />
+      </div>
+
       <div v-if="planResult" class="result-section">
         <h3 class="section-title">📋 规划结果</h3>
         <div class="result-item">
@@ -216,6 +224,8 @@ const considerWeather = ref(true)
 const pickingPoint = ref(null)
 const planning = ref(false)
 const planResult = ref(null)
+const planProgress = ref(null)      // 3D 真实建筑绕行计算进度（0-100 / null=隐藏）
+const planProgressLabel = ref('')
 
 // 自定义标记
 let startMarker = null
@@ -393,10 +403,24 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
     if (m) waypointMarkers.push(m)
   }
 
-  // 绘制路径线（传入巡航高度与避障开关，供 3D 细密横向避让使用）
+  // 控制点（起点/途经点/终点）——供 3D 客户端基于真实建筑的贴地绕行规划
+  const controlPts = [
+    { lng: startPoint.value.lng, lat: startPoint.value.lat },
+    ...activeWaypoints.map(w => ({ lng: w.lng, lat: w.lat })),
+    { lng: end.lng, lat: end.lat },
+  ]
+
+  // 绘制路径线（传入巡航高度/避障开关/控制点/进度回调，供 3D 真实建筑绕行规划使用）
   mapRef.drawPlanPath(pathPoints, altitudeProfile, {
     cruiseAlt: suggestedAlt.value,
     avoidBuildings: avoidBuildings.value,
+    avoidNoFly: avoidNoFly.value,
+    controlPts,
+    onProgress: (frac, label) => {
+      planProgress.value = Math.round(frac * 100)
+      planProgressLabel.value = label || ''
+      if (frac >= 1) setTimeout(() => { planProgress.value = null }, 600)
+    },
   })
 }
 
@@ -449,6 +473,15 @@ function formatTime(s) {
 .slider-row { display: flex; align-items: center; gap: 8px; }
 .slider-row .el-slider { flex: 1; }
 .unit { font-size: 13px; color: #6b7280; flex-shrink: 0; }
+
+.plan-progress {
+  margin-top: 12px; padding: 12px 14px;
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px;
+}
+.plan-progress-label {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: #15803d; margin-bottom: 8px; font-weight: 500;
+}
 
 .result-section {
   background: #ffffff; border: 1px solid #e5e7eb;

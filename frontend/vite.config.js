@@ -176,8 +176,9 @@ class MinHeap {
   }
 }
 
-const NF_MARGIN = 150   // 禁飞区安全缓冲（米）
-const BUILD_RATIO = 1.0 // 建筑高度 > 限高 × 此系数 才算挡路（须绕行）
+const NF_MARGIN = 150     // 禁飞区安全缓冲（米）
+// 仅"非常低"的建筑可从上方飞越；高于此阈值的建筑一律水平绕行（与飞行限高无关）
+const BUILD_OVERFLY = 20  // 可越顶的最大建筑高度（米）
 
 function mockPlanPath(params) {
   const {
@@ -257,7 +258,8 @@ function mockPlanPath(params) {
         if (pointInPoly(lng, lat, poly) || distToPoly(lng, lat, poly) < NF_MARGIN) { kind = 'no_fly'; break }
       }
     }
-    if (!kind && doBuild && getBuildingHeight(lng, lat) > CEIL * BUILD_RATIO) kind = 'building'
+    // 建筑：高于"可越顶高度"即视为障碍 → 水平绕行（仅极低矮建筑可越顶）
+    if (!kind && doBuild && getBuildingHeight(lng, lat) > BUILD_OVERFLY) kind = 'building'
     blockCache.set(key, kind)
     return kind
   }
@@ -309,75 +311,111 @@ function mockPlanPath(params) {
     return null  // 不可达
   }
 
-  // ── 3. 逐段规划并拼接 ──────────────────────────────────
+  // 视线串拉（string-pulling）：消除栅格 A* 的 45°/90° 阶梯锯齿。
+  // 从当前点尽量直连最远的后续点，只要直线不穿障碍就跳过中间台阶点，得到任意角度直线。
+  const lineClear = (a, b) => {
+    const d = haversine(a, b)
+    const steps = Math.max(1, Math.ceil(d / (cellM * 0.5)))
+    for (let s = 1; s < steps; s++) {
+      const t = s / steps
+      const c = toCell({ lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t })
+      if (blockKind(c.r, c.c)) return false
+    }
+    return true
+  }
+  const stringPull = (pts) => {
+    if (pts.length <= 2) return pts
+    const out = [pts[0]]
+    let i = 0
+    while (i < pts.length - 1) {
+      let j = pts.length - 1
+      while (j > i + 1 && !lineClear(pts[i], pts[j])) j--
+      out.push(pts[j]); i = j
+    }
+    return out
+  }
+
+  // ── 3. 逐段规划：每段独立 A*+串拉，再按途经点拼接（务必经过每个途经点）─
   const warnings = []
   let isFeasible = true
-  let routeCells = []  // [{r,c}]
+  let poly = []
   for (let s = 0; s < ctrlPts.length - 1; s++) {
     const seg = astarSeg(toCell(ctrlPts[s]), toCell(ctrlPts[s + 1]))
+    let segPts
     if (!seg) {
       isFeasible = false
       warnings.push(`路径段 ${s + 1} 无法绕过障碍（可能被禁飞区封闭）`)
-      routeCells.push(toCell(ctrlPts[s]), toCell(ctrlPts[s + 1]))
-      continue
+      segPts = [ctrlPts[s], ctrlPts[s + 1]]
+    } else {
+      segPts = seg.map(({ r, c }) => cellCenter(r, c))
+      // 段首尾对齐精确控制点（起点/途经点/终点），串拉仅在本段内进行 → 途经点必经
+      segPts[0] = { lng: ctrlPts[s].lng, lat: ctrlPts[s].lat }
+      segPts[segPts.length - 1] = { lng: ctrlPts[s + 1].lng, lat: ctrlPts[s + 1].lat }
+      segPts = stringPull(segPts)
     }
-    if (routeCells.length && seg.length) seg.shift()  // 去重接缝
-    routeCells = routeCells.concat(seg)
+    if (poly.length) segPts = segPts.slice(1)  // 去重接缝（途经点保留在上一段末尾）
+    poly = poly.concat(segPts)
   }
 
-  // 栅格中心 → 经纬度；首尾对齐精确起终点
-  let poly = routeCells.map(({ r, c }) => cellCenter(r, c))
-  if (poly.length) { poly[0] = { lng: start.lng, lat: start.lat }; poly[poly.length - 1] = { lng: end.lng, lat: end.lat } }
-
-  // 共线点合并（保留干净的 45° 折线）
-  const simplified = []
-  for (let i = 0; i < poly.length; i++) {
-    if (i === 0 || i === poly.length - 1) { simplified.push(poly[i]); continue }
-    const a = poly[i - 1], b = poly[i], cc = poly[i + 1]
-    const cross = (b.lng - a.lng) * (cc.lat - a.lat) - (b.lat - a.lat) * (cc.lng - a.lng)
-    if (Math.abs(cross) > 1e-9) simplified.push(b)
-  }
-  poly = simplified.length >= 2 ? simplified : poly
-
-  // ── 4. Catmull-Rom 样条柔滑：把 45° 折线变成视觉曲线 ─────────
-  // 每段按弧长细分采样数，弧线更圆润；样条采样点若回落进障碍格则向外推出
-  const SAMPLE_M = Math.max(36, cellM)
-  const ext = [poly[0], ...poly, poly[poly.length - 1]]
-  let dense = []
-  for (let i = 1; i < ext.length - 2; i++) {
-    const p0 = ext[i - 1], p1 = ext[i], p2 = ext[i + 1], p3 = ext[i + 2]
-    const steps = Math.max(2, Math.round(haversine(p1, p2) / SAMPLE_M))
-    for (let k = 0; k < steps; k++) {
-      const t = k / steps
-      dense.push({
-        lng: catmullRom(p0.lng, p1.lng, p2.lng, p3.lng, t),
-        lat: catmullRom(p0.lat, p1.lat, p2.lat, p3.lat, t),
-      })
-    }
-  }
-  dense.push({ lng: end.lng, lat: end.lat })
-  dense[0] = { lng: start.lng, lat: start.lat }
-
-  // 柔滑可能把弧线"剪"进障碍格 → 逐点推回最近的可通行格（硬约束）
-  const pushOutOfBlocked = (p) => {
-    const cell = toCell(p)
-    if (!blockKind(cell.r, cell.c)) return p
-    for (let rad = 1; rad <= 6; rad++) {
-      let best = null, bestD = Infinity
-      for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
-        if (Math.max(Math.abs(dr), Math.abs(dc)) !== rad) continue
-        const nr = cell.r + dr, nc = cell.c + dc
-        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue
-        if (blockKind(nr, nc)) continue
-        const cc = cellCenter(nr, nc)
-        const d = (cc.lng - p.lng) ** 2 + (cc.lat - p.lat) ** 2
-        if (d < bestD) { bestD = d; best = cc }
+  // ── 4. Chaikin 切角柔滑：把 45° 折线变成圆润曲线（不会过冲，杜绝锐角毛刺）─
+  // Chaikin 角切割：曲线恒在控制折线凸包内，不会像样条那样在急转处过冲产生尖刺。
+  // A* 走廊本身已留足余量（禁飞区 150m、建筑高斯核心），轻微切角不会切入障碍。
+  const chaikin = (pts, iters) => {
+    let p = pts
+    for (let it = 0; it < iters; it++) {
+      if (p.length < 3) break
+      const out = [p[0]]
+      for (let i = 0; i < p.length - 1; i++) {
+        const a = p[i], b = p[i + 1]
+        out.push({ lng: a.lng * 0.75 + b.lng * 0.25, lat: a.lat * 0.75 + b.lat * 0.25 })
+        out.push({ lng: a.lng * 0.25 + b.lng * 0.75, lat: a.lat * 0.25 + b.lat * 0.75 })
       }
-      if (best) return best
+      out.push(p[p.length - 1])
+      p = out
     }
     return p
   }
-  for (let i = 1; i < dense.length - 1; i++) dense[i] = pushOutOfBlocked(dense[i])
+  // 按弧长均匀重采样（高度斜坡与配色需要近似等距点）
+  const SAMPLE_M = Math.max(36, cellM)
+  const resampleM = (pts, S) => {
+    if (pts.length < 2) return pts.slice()
+    const out = [pts[0]]
+    let d = S
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i]
+      const segLen = haversine(a, b)
+      if (segLen < 1e-9) continue
+      while (d <= segLen) {
+        const t = d / segLen
+        out.push({ lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t })
+        d += S
+      }
+      d -= segLen
+    }
+    out.push(pts[pts.length - 1])
+    return out
+  }
+  let dense = resampleM(chaikin(poly, 3), SAMPLE_M)
+  dense[0] = { lng: start.lng, lat: start.lat }
+  dense[dense.length - 1] = { lng: end.lng, lat: end.lat }
+
+  // 兜底：极少数点若仍落在障碍格内，沿质心反方向小步推出（步长受限，不产生尖刺）
+  for (let i = 1; i < dense.length - 1; i++) {
+    const cell = toCell(dense[i])
+    let k = blockKind(cell.r, cell.c)
+    if (!k) continue
+    let p = dense[i]
+    const ml = mPerDegLng(p.lat)
+    const prev = dense[i - 1], next = dense[i + 1]
+    // 推离方向：远离前后点连线中点（即弯道外侧）
+    let nx = p.lng - (prev.lng + next.lng) / 2, ny = p.lat - (prev.lat + next.lat) / 2
+    const L = Math.hypot(nx * ml, ny * MPD) || 1
+    nx = (nx * ml) / L; ny = (ny * MPD) / L
+    for (let s = 1; s <= 4 && blockKind(toCell(p).r, toCell(p).c); s++) {
+      p = { lng: p.lng + nx * (cellM * 0.6) / ml, lat: p.lat + ny * (cellM * 0.6) / MPD }
+    }
+    dense[i] = p
+  }
   const n = dense.length
 
   // ── 5. 高度剖面 + 相位配色 ─────────────────────────────
@@ -398,10 +436,14 @@ function mockPlanPath(params) {
           if (distToPoly(p.lng, p.lat, o) < NF_MARGIN * 1.8) { phase = 'no_fly'; nearNoFly = true; break }
         }
       }
-      // 紧贴/飞越高层建筑 → 紫色段
+      // 正在贴着建筑群绕行 → 紫色段（航线本身已避开建筑格，故检测附近是否有建筑）
       if (phase === 'cruise' && doBuild) {
-        const bh = getBuildingHeight(p.lng, p.lat)
-        if (bh > CEIL * 0.55) { phase = 'building'; nearBuilding = true }
+        const off = 110 / mPerDegLng(p.lat), offY = 110 / MPD
+        const near = Math.max(
+          getBuildingHeight(p.lng + off, p.lat), getBuildingHeight(p.lng - off, p.lat),
+          getBuildingHeight(p.lng, p.lat + offY), getBuildingHeight(p.lng, p.lat - offY),
+        )
+        if (near > BUILD_OVERFLY) { phase = 'building'; nearBuilding = true }
       }
     }
     return { alt: Math.round(alt), phase }
@@ -417,7 +459,7 @@ function mockPlanPath(params) {
   const estimated_time = Math.round(total_distance / (drone_speed * 1000 / 3600))
 
   if (nearNoFly) warnings.push('已水平绕行禁飞区（保持安全缓冲距离）')
-  if (nearBuilding) warnings.push(`已水平绕行高于限高的高层建筑群（强制飞行限高 ${CEIL}m）`)
+  if (nearBuilding) warnings.push(`已水平绕行建筑群（仅 ${BUILD_OVERFLY}m 以下矮建筑越顶飞越，巡航限高 ${CEIL}m）`)
   if (CEIL > 200) warnings.push(`飞行限高 ${CEIL}m，请确认已获得空域授权`)
 
   return { is_feasible: isFeasible, total_distance, estimated_time, warnings, path, altitude_profile }

@@ -689,99 +689,33 @@ function _dilateMax(arr, w) {
   return r
 }
 
-// 数组均值平滑（带符号，用于横向偏移缓入缓出），保留首尾
-function _smoothSeq(arr, w) {
-  const r = arr.slice()
-  for (let i = 1; i < arr.length - 1; i++) {
-    let s = 0, c = 0
-    for (let k = -w; k <= w; k++) { const j = i + k; if (j >= 0 && j < arr.length) { s += arr[j]; c++ } }
-    r[i] = s / c
-  }
-  return r
-}
-
-// ── 穿模检测与航线校正：用真实 OSM 建筑高度逐点采样 ──────────────
-// 核心问题：服务端按高斯模型水平绕行，但真实 OSM 建筑轮廓不一致，航线仍可能穿模。
-// 解决：① 采样真实建筑高度，找出穿模点（建筑高于航线高度）；
-//      ② 高于限高的建筑 → 横向偏移绕开（在垂直航向方向逐级试探，批量采样验证）；
-//      ③ 低于限高/横向无解的残余穿模 → 垂直抬升兜底（绝不留穿模），缓入缓出成平滑弧。
-async function correctForBuildings(points, profile, ceiling = Infinity) {
+// ── 穿模垂直校正：用真实 OSM 建筑高度逐点采样，防穿模 ──────────────
+// 水平绕行已在服务端基于"可越顶高度"完成（高于 35m 的建筑均水平绕开），此处不再改横向，
+// 仅做垂直兜底：真实 OSM 建筑若仍高于航线（模型与真实轮廓有差异），平滑抬升越过，绝不留穿模。
+// 不做横向偏移，从根本上消除横向左右震荡。
+async function correctForBuildings(points, profile) {
   if (!viewer?.scene?.sampleHeightMostDetailed || points.length < 2) return null
   const n = points.length
   const MARGIN = 15            // 垂直安全余量（米）
-  const OFFSETS = [40, 80, 130, 190, 260, 340]  // 横向试探距离（米）
-  const MPD = 111320
 
-  const sampleH = async (pts) => {
-    try {
-      const carto = pts.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
-      const s = await viewer.scene.sampleHeightMostDetailed(carto)
-      return s.map(c => (c && c.height > 0 ? c.height : 0))
-    } catch { return null }
-  }
+  const carto = points.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
+  let sampled
+  try { sampled = await viewer.scene.sampleHeightMostDetailed(carto) } catch { return null }
+  const buildH = sampled.map(c => (c && c.height > 0 ? c.height : 0))
+  if (!buildH.some(h => h > 0)) return null  // 建筑瓦片未就绪 → 保留服务端航迹
 
-  const baseAlt = profile.map(p => p.alt)
-  const buildH = await sampleH(points)
-  if (!buildH || !buildH.some(h => h > 0)) return null  // 建筑瓦片未就绪 → 保留服务端航迹
-
-  // 可校正的相位（巡航/建筑/禁飞绕行段；起降段保持原样）
   const adjustable = (i) => profile[i].phase !== 'ascent' && profile[i].phase !== 'descent'
-  // 单位垂直航向向量（经纬度增量），用于横向偏移
-  const perp = (i) => {
-    const a = points[Math.max(0, i - 1)], b = points[Math.min(n - 1, i + 1)]
-    const ml = MPD * Math.cos(points[i].lat * Math.PI / 180)
-    let dx = (b.lng - a.lng) * ml, dy = (b.lat - a.lat) * MPD
-    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L
-    return { lng: -dy / ml, lat: dx / MPD }  // 旋转 90° 后换回经纬度
-  }
-
-  // ① 穿模点：真实建筑高于航线高度 + 余量
-  const pen = buildH.map((h, i) => h > 0 && adjustable(i) && h + MARGIN > baseAlt[i])
-
-  // ② 对"高于限高"的穿模点做横向绕行候选，批量采样验证
-  const cand = []   // { i, signed, lng, lat }
-  for (let i = 0; i < n; i++) {
-    if (!pen[i] || buildH[i] <= ceiling) continue   // 低于限高的留给垂直抬升
-    const pp = perp(i)
-    for (const side of [1, -1]) for (const d of OFFSETS) {
-      cand.push({ i, signed: side * d, lng: points[i].lng + pp.lng * side * d, lat: points[i].lat + pp.lat * side * d })
-    }
-  }
-  const latOff = new Array(n).fill(0)      // 每点横向偏移（米，带符号）
-  if (cand.length) {
-    const candH = await sampleH(cand) || cand.map(() => 9999)
-    const pick = new Map()                  // i → 最小 |偏移| 的可行候选
-    cand.forEach((c, k) => {
-      if (candH[k] + MARGIN < baseAlt[c.i]) {  // 该偏移点航线高度可净空
-        const cur = pick.get(c.i)
-        if (!cur || Math.abs(c.signed) < Math.abs(cur.signed)) pick.set(c.i, c)
-      }
-    })
-    for (const [i, c] of pick) latOff[i] = c.signed
-  }
-  // 横向偏移缓入缓出平滑（避免突兀折角，形成圆润绕行弧）
-  let latS = _smoothSeq(latOff, 3); latS = _smoothSeq(latS, 3)
-
-  const newPts = points.map((p, i) => {
-    if (Math.abs(latS[i]) < 1) return { ...p }
-    const pp = perp(i)
-    return { lng: p.lng + pp.lng * latS[i], lat: p.lat + pp.lat * latS[i], alt: p.alt }
-  })
-
-  // ③ 重新采样校正后航线，对残余穿模（低矮建筑或横向无解）垂直抬升兜底
-  const buildH2 = await sampleH(newPts) || buildH
-  const need = baseAlt.map((a, i) => (adjustable(i) && buildH2[i] > 0) ? Math.max(a, buildH2[i] + MARGIN) : a)
-  let alt = _dilateMax(need, 2)    // 抬升段扩成平台
-  alt = _smooth(alt, 2)            // 平滑成缓坡
+  const baseAlt = profile.map(p => p.alt)
+  // 真实建筑高于航线 → 抬升越过；膨胀成平台 + 均值平滑（缓坡，无针尖）
+  const need = baseAlt.map((a, i) => (adjustable(i) && buildH[i] > 0) ? Math.max(a, buildH[i] + MARGIN) : a)
+  let alt = _dilateMax(need, 2)
+  alt = _smooth(alt, 2)
   for (let i = 0; i < n; i++) if (!adjustable(i)) alt[i] = baseAlt[i]  // 起降段保留斜坡
 
-  return newPts.map((p, i) => {
-    const moved = Math.abs(latS[i]) > 2 || alt[i] > baseAlt[i] + 5
-    return {
-      lng: p.lng, lat: p.lat, alt: Math.round(alt[i]), index: i,
-      phase: (moved && adjustable(i)) ? 'building' : profile[i].phase,
-    }
-  })
+  return points.map((p, i) => ({
+    lng: p.lng, lat: p.lat, alt: Math.round(alt[i]), index: i,
+    phase: (alt[i] > baseAlt[i] + 5 && adjustable(i) && profile[i].phase === 'cruise') ? 'building' : profile[i].phase,
+  }))
 }
 
 // 从服务端剖面推断巡航高度
@@ -791,6 +725,286 @@ function _deriveCruise(profile) {
   const pool = cruise.length ? cruise : profile.map(p => p.alt)
   pool.sort((a, b) => a - b)
   return pool[Math.floor(pool.length / 2)]
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 客户端"贴地规划再平移高空"路径规划：用真实 OSM 建筑高度做精细栅格避障
+//
+// 思路（按用户构想）：先在贴近地面的视角下，把高于"可越顶高度"的真实建筑都视为障碍，
+// 用精细栅格（~10m）A* 绕行 → 天然实现对建筑物的水平绕行；再把整条航线平移到巡航高度。
+// 矮建筑（< 可越顶高度）不绕行，巡航高度直接越过。采样耗时，故回调上报进度。
+// ════════════════════════════════════════════════════════════════════
+const _MPD = 111320
+const _mLng = (lat) => 111320 * Math.cos(lat * Math.PI / 180)
+function _hav(a, b) {
+  const R = 6371000, dLat = (b.lat - a.lat) * Math.PI / 180, dLng = (b.lng - a.lng) * Math.PI / 180
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s))
+}
+function _pointInPoly(lng, lat, poly) {
+  const p = poly.pts; let inside = false
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+    const xi = p[i].lng, yi = p[i].lat, xj = p[j].lng, yj = p[j].lat
+    if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside
+  }
+  return inside
+}
+function _buildNoFlyPolys() {
+  const polys = []
+  const fc = zoneStore.noFlyZones
+  if (!fc?.features) return polys
+  for (const f of fc.features) {
+    const g = f.geometry; if (!g) continue
+    const rings = g.type === 'Polygon' ? [g.coordinates[0]]
+      : g.type === 'MultiPolygon' ? g.coordinates.map(c => c[0]) : []
+    for (const ring of rings) {
+      const pts = ring.map(c => ({ lng: c[0], lat: c[1] }))
+      if (pts.length < 3) continue
+      let mnL = Infinity, mxL = -Infinity, mnA = Infinity, mxA = -Infinity
+      for (const p of pts) { mnL = Math.min(mnL, p.lng); mxL = Math.max(mxL, p.lng); mnA = Math.min(mnA, p.lat); mxA = Math.max(mxA, p.lat) }
+      polys.push({ pts, minLng: mnL, maxLng: mxL, minLat: mnA, maxLat: mxA })
+    }
+  }
+  return polys
+}
+
+class _MinHeap {
+  constructor() { this.a = [] }
+  get size() { return this.a.length }
+  push(n) { const a = this.a; a.push(n); let i = a.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (a[p].f <= a[i].f) break;[a[p], a[i]] = [a[i], a[p]]; i = p } }
+  pop() { const a = this.a, t = a[0], l = a.pop(); if (a.length) { a[0] = l; let i = 0; const n = a.length; while (true) { let s = i, L = 2 * i + 1, r = L + 1; if (L < n && a[L].f < a[s].f) s = L; if (r < n && a[r].f < a[s].f) s = r; if (s === i) break;[a[s], a[i]] = [a[i], a[s]]; i = s } } return t } }
+
+// 建筑离地高度缓存：键为「分辨率:全局列_全局行」，跨多次规划复用（同区域瞬时完成）
+const _bhCache = new Map()
+const _REF_LAT = 23.13          // 广州参考纬度（固定 → 全局栅格对齐，缓存可跨规划命中）
+const _mLngRef = _mLng(_REF_LAT)
+
+async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
+  if (!viewer?.scene?.sampleHeightMostDetailed || !controlPts || controlPts.length < 2) return null
+  const cruiseAlt = Math.max(30, Math.min(300, opts.cruiseAlt || 120))
+  const OVERFLY = opts.overflyMax ?? 20
+  const noFlyPolys = opts.avoidNoFly === false ? [] : _buildNoFlyPolys()
+
+  // ── 1. 全局对齐栅格 + 走廊裁剪（只在航线两侧一定宽度内计算）─────────
+  let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity
+  for (const p of controlPts) {
+    minLng = Math.min(minLng, p.lng); maxLng = Math.max(maxLng, p.lng)
+    minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat)
+  }
+  const CORRIDOR = 360  // 走廊半宽（米）：绕行可用空间，超出走廊视作开阔（不采样）
+  minLng -= CORRIDOR / _mLngRef; maxLng += CORRIDOR / _mLngRef
+  minLat -= CORRIDOR / _MPD; maxLat += CORRIDOR / _MPD
+
+  // 固定 10m 栅格并对齐到全局整数格（缓存键依赖全局格号）；过大则按 2 的幂放粗
+  let CELL = 10, cellLat, cellLng, C0, R0, cols, rows, total
+  const MAX_CELLS = 60000
+  while (true) {
+    cellLat = CELL / _MPD; cellLng = CELL / _mLngRef
+    C0 = Math.floor(minLng / cellLng); R0 = Math.floor(minLat / cellLat)
+    cols = Math.ceil(maxLng / cellLng) - C0 + 1
+    rows = Math.ceil(maxLat / cellLat) - R0 + 1
+    total = rows * cols
+    if (total <= MAX_CELLS || CELL >= 80) break
+    CELL *= 2
+  }
+  const cellM = CELL   // 下游 A*/串拉/重采样按米计算用
+  const cellCenter = (r, c) => ({ lng: (C0 + c + 0.5) * cellLng, lat: (R0 + r + 0.5) * cellLat })
+  const toCell = (p) => ({
+    r: Math.max(0, Math.min(rows - 1, Math.floor(p.lat / cellLat) - R0)),
+    c: Math.max(0, Math.min(cols - 1, Math.floor(p.lng / cellLng) - C0)),
+  })
+  const ckey = (r, c) => `${CELL}:${C0 + c}_${R0 + r}`
+
+  // 走廊掩码：到任一控制段的距离 ≤ CORRIDOR 才纳入计算
+  const segs = []
+  for (let s = 0; s < controlPts.length - 1; s++) segs.push([controlPts[s], controlPts[s + 1]])
+  const distToSegsM = (lng, lat) => {
+    let best = Infinity
+    for (const [a, b] of segs) {
+      const ax = (lng - a.lng) * _mLngRef, ay = (lat - a.lat) * _MPD
+      const bx = (b.lng - a.lng) * _mLngRef, by = (b.lat - a.lat) * _MPD
+      const L2 = bx * bx + by * by || 1
+      const t = Math.max(0, Math.min(1, (ax * bx + ay * by) / L2))
+      best = Math.min(best, Math.hypot(ax - bx * t, ay - by * t))
+    }
+    return best
+  }
+
+  // ── 2. 采样真实建筑高度：仅采样「走廊内 ∧ 未缓存」的格 ──────────────
+  const buildH = new Float32Array(total)         // 建筑离地高度（走廊外＝0，视作开阔）
+  const inCorridor = new Uint8Array(total)
+  const needCells = []                            // 需新采样的格 {r,c,i}
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = r * cols + c
+    const cc = cellCenter(r, c)
+    if (distToSegsM(cc.lng, cc.lat) > CORRIDOR) continue
+    inCorridor[i] = 1
+    const cached = _bhCache.get(ckey(r, c))
+    if (cached !== undefined) { buildH[i] = cached; continue }
+    needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
+  }
+
+  if (onProgress) onProgress(0.06, needCells.length ? `采样真实建筑（${needCells.length} 点）` : '复用缓存')
+  if (needCells.length) {
+    const terrainProv = viewer.terrainProvider
+    // 地形：仅对需采样点做一次性采样（平缓，足够）；与场景采样并行
+    const terrCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+    const sceneCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+    const terrainPromise = terrainProv
+      ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
+    const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
+    const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
+    if (!viewer || viewer.isDestroyed()) return null
+    if (scene === null) return null   // 采样失败/瓦片未就绪 → 交回退（不写入错误缓存）
+    for (let k = 0; k < needCells.length; k++) {
+      const { i } = needCells[k]
+      const sh = (scene[k] && Number.isFinite(scene[k].height)) ? scene[k].height : 0
+      const th = (terr && terr[k] && Number.isFinite(terr[k].height)) ? terr[k].height : 0
+      const h = Math.max(0, sh - th)
+      buildH[i] = h
+      _bhCache.set(ckey(needCells[k].r, needCells[k].c), h)   // 写入缓存
+    }
+    if (_bhCache.size > 400000) _bhCache.clear()   // 防无限增长
+  }
+
+  // ── 3. 障碍栅格：高于可越顶的真实建筑 + 禁飞区 ───────────────
+  if (onProgress) onProgress(0.9, '计算绕行航线')
+  const blocked = new Uint8Array(total)  // 0 通行 / 1 建筑 / 2 禁飞
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = r * cols + c
+    if (inCorridor[i] && buildH[i] > OVERFLY) { blocked[i] = 1; continue }
+    if (noFlyPolys.length) {
+      const cc = cellCenter(r, c)
+      for (const poly of noFlyPolys) {
+        if (cc.lng < poly.minLng || cc.lng > poly.maxLng || cc.lat < poly.minLat || cc.lat > poly.maxLat) continue
+        if (_pointInPoly(cc.lng, cc.lat, poly)) { blocked[i] = 2; break }
+      }
+    }
+  }
+  const isBlk = (r, c) => blocked[r * cols + c]
+  // 起终/途经点若落在障碍内，就近找可通行格
+  const nearestFree = (cell) => {
+    if (!isBlk(cell.r, cell.c)) return cell
+    for (let rad = 1; rad <= 25; rad++) {
+      for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
+        if (Math.max(Math.abs(dr), Math.abs(dc)) !== rad) continue
+        const nr = cell.r + dr, nc = cell.c + dc
+        if (nr >= 0 && nc >= 0 && nr < rows && nc < cols && !isBlk(nr, nc)) return { r: nr, c: nc }
+      }
+    }
+    return cell
+  }
+
+  // ── 4. 8 方向 A*（保留途经点：逐段规划）──────────────────────
+  const astarSeg = (sCell, gCell) => {
+    const gKey = gCell.r * cols + gCell.c
+    const oct = (r, c) => { const dr = Math.abs(r - gCell.r), dc = Math.abs(c - gCell.c); return cellM * (Math.max(dr, dc) + (Math.SQRT2 - 1) * Math.min(dr, dc)) }
+    const open = new _MinHeap(), gS = new Map(), par = new Map()
+    const sKey = sCell.r * cols + sCell.c
+    gS.set(sKey, 0); open.push({ r: sCell.r, c: sCell.c, f: oct(sCell.r, sCell.c) })
+    const closed = new Set(); let guard = 0
+    while (open.size && guard++ < total) {
+      const cur = open.pop(); const cK = cur.r * cols + cur.c
+      if (cK === gKey) { const cells = []; let k = cK; while (k !== undefined) { cells.push({ r: Math.floor(k / cols), c: k % cols }); k = par.get(k) } cells.reverse(); return cells }
+      if (closed.has(cK)) continue
+      closed.add(cK)
+      const gc = gS.get(cK)
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        if (!dr && !dc) continue
+        const nr = cur.r + dr, nc = cur.c + dc
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue
+        const nK = nr * cols + nc
+        if (closed.has(nK)) continue
+        if (nK !== gKey && isBlk(nr, nc)) continue
+        if (dr && dc && (isBlk(cur.r, nc) || isBlk(nr, cur.c))) continue   // 防斜穿障碍角
+        const step = (dr && dc) ? cellM * Math.SQRT2 : cellM
+        const ng = gc + step
+        if (ng < (gS.get(nK) ?? Infinity)) { gS.set(nK, ng); par.set(nK, cK); open.push({ r: nr, c: nc, f: ng + oct(nr, nc) }) }
+      }
+    }
+    return null
+  }
+
+  const lineClear = (a, b) => {
+    const d = _hav(a, b), steps = Math.max(1, Math.ceil(d / (cellM * 0.5)))
+    for (let s = 1; s < steps; s++) {
+      const t = s / steps
+      const c = toCell({ lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t })
+      if (isBlk(c.r, c.c)) return false
+    }
+    return true
+  }
+  const stringPull = (pts) => {
+    if (pts.length <= 2) return pts
+    const out = [pts[0]]; let i = 0
+    while (i < pts.length - 1) { let j = pts.length - 1; while (j > i + 1 && !lineClear(pts[i], pts[j])) j--; out.push(pts[j]); i = j }
+    return out
+  }
+
+  let feasible = true
+  let poly = []
+  for (let s = 0; s < controlPts.length - 1; s++) {
+    const seg = astarSeg(nearestFree(toCell(controlPts[s])), nearestFree(toCell(controlPts[s + 1])))
+    let segPts
+    if (!seg) { feasible = false; segPts = [controlPts[s], controlPts[s + 1]] }
+    else {
+      segPts = seg.map(({ r, c }) => cellCenter(r, c))
+      segPts[0] = { lng: controlPts[s].lng, lat: controlPts[s].lat }
+      segPts[segPts.length - 1] = { lng: controlPts[s + 1].lng, lat: controlPts[s + 1].lat }
+      segPts = stringPull(segPts)
+    }
+    if (poly.length) segPts = segPts.slice(1)
+    poly = poly.concat(segPts)
+  }
+
+  // ── 5. Chaikin 柔滑 + 均匀重采样 ───────────────────────────
+  const chaikin = (pts, it) => {
+    let p = pts
+    for (let k = 0; k < it; k++) {
+      if (p.length < 3) break
+      const o = [p[0]]
+      for (let i = 0; i < p.length - 1; i++) { const a = p[i], b = p[i + 1]; o.push({ lng: a.lng * 0.75 + b.lng * 0.25, lat: a.lat * 0.75 + b.lat * 0.25 }); o.push({ lng: a.lng * 0.25 + b.lng * 0.75, lat: a.lat * 0.25 + b.lat * 0.75 }) }
+      o.push(p[p.length - 1]); p = o
+    }
+    return p
+  }
+  const SAMPLE_M = Math.max(20, cellM)
+  const resampleM = (pts, S) => {
+    const o = [pts[0]]; let d = S
+    for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i], L = _hav(a, b); if (L < 1e-9) continue; while (d <= L) { const t = d / L; o.push({ lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t }); d += S } d -= L }
+    o.push(pts[pts.length - 1]); return o
+  }
+  let dense = resampleM(chaikin(poly, 3), SAMPLE_M)
+  dense[0] = controlPts[0]; dense[dense.length - 1] = controlPts[controlPts.length - 1]
+  const n = dense.length
+
+  // ── 6. 高度剖面（平移到巡航高度）+ 绕行段配色 ───────────────
+  const ASCENT_R = 0.1, DESCENT_R = 0.1
+  const nearBlk = (p, kind) => {
+    const cell = toCell(p)
+    for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+      const nr = cell.r + dr, nc = cell.c + dc
+      if (nr >= 0 && nc >= 0 && nr < rows && nc < cols && blocked[nr * cols + nc] === kind) return true
+    }
+    return false
+  }
+  const altitude_profile = [], path = []
+  for (let i = 0; i < n; i++) {
+    const t = i / Math.max(n - 1, 1)
+    let alt, phase
+    if (t < ASCENT_R) { alt = 20 + (cruiseAlt - 20) * (t / ASCENT_R); phase = 'ascent' }
+    else if (t > 1 - DESCENT_R) { alt = 20 + (cruiseAlt - 20) * ((1 - t) / DESCENT_R); phase = 'descent' }
+    else {
+      alt = cruiseAlt; phase = 'cruise'
+      if (nearBlk(dense[i], 2)) phase = 'no_fly'
+      else if (nearBlk(dense[i], 1)) phase = 'building'
+    }
+    altitude_profile.push({ index: i, alt: Math.round(alt), phase })
+    path.push({ lng: dense[i].lng, lat: dense[i].lat, alt: Math.round(alt), index: i })
+  }
+
+  if (onProgress) onProgress(1, '完成')
+  return { path, altitude_profile, is_feasible: feasible }
 }
 
 // 核心绘制逻辑（同步），接受任意高度剖面（初始或校正后均可）
@@ -833,17 +1047,25 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
       return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt)
     })
 
-    if (phase === 'building' || phase === 'no_fly') {
+    const isAvoid = phase === 'building' || phase === 'no_fly'
+    if (isAvoid) {
+      // 规避段：更宽的外发光光晕，醒目区别于巡航段
       const haloColor = phase === 'no_fly' ? '#ef4444' : '#a855f7'
       planPathEntities.push(viewer.entities.add({
-        polyline: { positions, width: 11, material: C(haloColor).withAlpha(0.25), clampToGround: false }
+        polyline: { positions, width: 22, material: C(haloColor).withAlpha(0.22), clampToGround: false }
+      }))
+      planPathEntities.push(viewer.entities.add({
+        polyline: { positions, width: 14, material: C(haloColor).withAlpha(0.32), clampToGround: false }
       }))
     }
     planPathEntities.push(viewer.entities.add({
       polyline: {
         positions,
-        width: (phase === 'building' || phase === 'no_fly') ? 5 : 4,
-        material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.25, color: color.withAlpha(0.95) }),
+        width: isAvoid ? 9 : 7,   // 整体加粗；规避段更粗
+        material: new Cesium.PolylineGlowMaterialProperty({
+          glowPower: isAvoid ? 0.35 : 0.2,
+          color: color.withAlpha(isAvoid ? 1.0 : 0.95),
+        }),
         clampToGround: false,
       }
     }))
@@ -880,13 +1102,30 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   _drawPlanPathCore(pathPoints, altitudeProfile)
   viewer.scene.requestRender()
 
-  // 第二步：异步细密横向避让（仅在开启避障且有剖面时）
+  // 第二步：异步避障重绘（仅在开启避障且有剖面时）
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
   if (!hasProfile || opts.avoidBuildings === false) return
 
+  // 首选：客户端"贴地规划再平移高空"——用真实 OSM 建筑做精细栅格水平绕行
+  if (opts.controlPts && opts.controlPts.length >= 2) {
+    if (opts.onProgress) opts.onProgress(0.01, '准备真实建筑数据')
+    try {
+      const planned = await planAroundBuildings(opts.controlPts, {
+        cruiseAlt: opts.cruiseAlt, overflyMax: opts.overflyMax, avoidNoFly: opts.avoidNoFly,
+      }, opts.onProgress)
+      if (viewer && !viewer.isDestroyed() && planned && planned.path.length) {
+        clearPlanPath()
+        _drawPlanPathCore(planned.path, planned.altitude_profile)
+        viewer.scene.requestRender()
+        return
+      }
+    } catch { /* 规划失败 → 回退垂直防穿模 */ }
+    if (opts.onProgress) opts.onProgress(1, '完成')
+  }
+
+  // 回退：保留服务端水平航线，仅做垂直防穿模
   try {
-    // 返回的是校正后的航迹点（含横向偏移 + 抬升 + 相位），位置与高度均可能改变
-    const corrected = await correctForBuildings(pathPoints, altitudeProfile, opts.cruiseAlt ?? Infinity)
+    const corrected = await correctForBuildings(pathPoints, altitudeProfile)
     if (!viewer || viewer.isDestroyed() || !corrected) return
     clearPlanPath()
     _drawPlanPathCore(corrected, corrected)

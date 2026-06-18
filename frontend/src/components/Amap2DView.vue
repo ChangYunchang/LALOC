@@ -552,16 +552,28 @@ function drawPlanPath(pathPoints, altitudeProfile) {
       const segPoints = pathPoints.slice(startIdx, endIdx + 1).map(p => [p.lng, p.lat])
       if (segPoints.length < 2) continue
 
-      // 避让段（建筑/禁飞区）加虚线描边，更加醒目
-      const isBuilding = (phase === 'building' || phase === 'no_fly')
+      // 规避段（建筑/禁飞区）：宽光晕垫底 + 加粗虚线，醒目区别于巡航段
+      const isAvoid = (phase === 'building' || phase === 'no_fly')
+      if (isAvoid) {
+        const halo = new AMap.Polyline({
+          path: segPoints,
+          strokeColor: color, strokeWeight: 18, strokeOpacity: 0.22,
+          lineJoin: 'round', lineCap: 'round', zIndex: 99,
+        })
+        map.add(halo)
+        planPathLines.push(halo)
+      }
       const line = new AMap.Polyline({
         path: segPoints,
         strokeColor: color,
-        strokeWeight: isBuilding ? 7 : 5,
-        strokeOpacity: 0.92,
-        strokeStyle: isBuilding ? 'dashed' : 'solid',
-        strokeDasharray: isBuilding ? [8, 4] : undefined,
-        showDir: b === boundaries.length - 2,  // 最后一段显示方向箭头
+        strokeWeight: isAvoid ? 9 : 6,        // 整体加粗；规避段更粗
+        strokeOpacity: 0.95,
+        strokeStyle: isAvoid ? 'dashed' : 'solid',
+        strokeDasharray: isAvoid ? [10, 6] : undefined,
+        isOutline: !isAvoid,                  // 巡航段加白色描边，层次更清晰
+        outlineColor: '#ffffff',
+        borderWeight: isAvoid ? 0 : 1.5,
+        showDir: b === boundaries.length - 2, // 最后一段显示方向箭头
         lineJoin: 'round', lineCap: 'round', zIndex: 100,
       })
       map.add(line)
