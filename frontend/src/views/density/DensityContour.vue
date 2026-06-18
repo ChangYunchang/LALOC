@@ -62,7 +62,32 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
-import * as Cesium from 'cesium'
+
+let Cesium = null
+async function loadCesium() {
+  if (Cesium) return Cesium
+  window.CESIUM_BASE_URL = '/cesium/'
+  if (!document.querySelector('link[data-cesium]')) {
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = '/cesium/Widgets/widgets.css'
+    link.setAttribute('data-cesium', '1')
+    document.head.appendChild(link)
+  }
+  if (!window.Cesium) {
+    await new Promise((resolve, reject) => {
+      if (document.querySelector('script[data-cesium]')) { resolve(); return }
+      const script = document.createElement('script')
+      script.src = '/cesium/Cesium.js'
+      script.setAttribute('data-cesium', '1')
+      script.onload = resolve
+      script.onerror = () => reject(new Error('Cesium.js load failed'))
+      document.head.appendChild(script)
+    })
+  }
+  Cesium = window.Cesium
+  return Cesium
+}
 
 // ── 时段配置 ─────────────────────────────────────────
 const timePeriods = [
@@ -183,6 +208,7 @@ function densityColor(d) {
 
 async function initCesium() {
   if (!cesiumRef.value) return
+  await loadCesium()
   Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
   cesiumViewer = new Cesium.Viewer(cesiumRef.value, {
     terrain: Cesium.Terrain.fromWorldTerrain(),
