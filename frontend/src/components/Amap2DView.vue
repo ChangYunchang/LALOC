@@ -510,17 +510,24 @@ watch(() => mapStore.routeDataList, (routes) => {
 // ── 规划路径绘制 ──────────────────────────────
 let planPathLines = []
 
+const PLAN_PHASE_COLORS = {
+  ascent: '#22c55e', cruise: '#3b82f6', descent: '#f59e0b',
+  height_limit: '#ef4444', building: '#a855f7', no_fly: '#ef4444',
+}
+const PLAN_PHASE_LABELS = {
+  ascent: '起飞爬升', cruise: '巡航', descent: '降落下降',
+  height_limit: '限高绕行', building: '建筑避让', no_fly: '禁飞区绕行',
+}
+
 function drawPlanPath(pathPoints, altitudeProfile) {
   clearPlanPath()
   const map = mapStore.map
   if (!map || !AMap || !pathPoints?.length) return
 
-  const phaseColors = {
-    ascent: '#22c55e', cruise: '#3b82f6', descent: '#f59e0b',
-    height_limit: '#ef4444', building: '#a855f7',
-  }
+  const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
 
-  if (!altitudeProfile || altitudeProfile.length !== pathPoints.length) {
+  if (!hasProfile) {
+    // fallback: 单色折线
     const line = new AMap.Polyline({
       path: pathPoints.map(p => [p.lng, p.lat]),
       strokeColor: '#3b82f6', strokeWeight: 5, strokeOpacity: 0.9,
@@ -529,28 +536,67 @@ function drawPlanPath(pathPoints, altitudeProfile) {
     map.add(line)
     planPathLines.push(line)
   } else {
+    // 按相位分段绘制，每段对应不同颜色
     const boundaries = [0]
     for (let i = 1; i < pathPoints.length; i++) {
       if (altitudeProfile[i].phase !== altitudeProfile[i - 1].phase) boundaries.push(i)
     }
-    for (let b = 0; b < boundaries.length; b++) {
+    boundaries.push(pathPoints.length - 1)  // 确保末尾段始终被绘制
+
+    for (let b = 0; b < boundaries.length - 1; b++) {
       const startIdx = boundaries[b]
-      const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : pathPoints.length - 1
-      const phase = altitudeProfile[startIdx].phase
-      const color = phaseColors[phase] || '#3b82f6'
+      const endIdx   = boundaries[b + 1]
+      const phase    = altitudeProfile[startIdx].phase
+      const color    = PLAN_PHASE_COLORS[phase] || '#3b82f6'
+      // 首尾段各自包含端点，确保段落首尾衔接
       const segPoints = pathPoints.slice(startIdx, endIdx + 1).map(p => [p.lng, p.lat])
-      if (segPoints.length >= 2) {
-        const line = new AMap.Polyline({
-          path: segPoints, strokeColor: color, strokeWeight: 5,
-          strokeOpacity: 0.9, showDir: b === boundaries.length - 1,
-          lineJoin: 'round', lineCap: 'round', zIndex: 100,
-        })
-        map.add(line)
-        planPathLines.push(line)
-      }
+      if (segPoints.length < 2) continue
+
+      // 避让段（建筑/禁飞区）加虚线描边，更加醒目
+      const isBuilding = (phase === 'building' || phase === 'no_fly')
+      const line = new AMap.Polyline({
+        path: segPoints,
+        strokeColor: color,
+        strokeWeight: isBuilding ? 7 : 5,
+        strokeOpacity: 0.92,
+        strokeStyle: isBuilding ? 'dashed' : 'solid',
+        strokeDasharray: isBuilding ? [8, 4] : undefined,
+        showDir: b === boundaries.length - 2,  // 最后一段显示方向箭头
+        lineJoin: 'round', lineCap: 'round', zIndex: 100,
+      })
+      map.add(line)
+      planPathLines.push(line)
+    }
+
+    // 在相位切换点添加高度标注
+    const phaseChanges = boundaries.slice(1, -1)  // 去掉首尾
+    for (const idx of phaseChanges) {
+      const p = pathPoints[idx]
+      const alt = altitudeProfile[idx]?.alt
+      if (!alt) continue
+      const label = new AMap.Text({
+        text: `${alt}m`,
+        position: new AMap.LngLat(p.lng, p.lat),
+        offset: new AMap.Pixel(0, -18),
+        style: {
+          'background-color': 'rgba(255,255,255,0.9)',
+          'border': '1px solid #d1d5db',
+          'border-radius': '4px',
+          'padding': '1px 5px',
+          'font-size': '11px',
+          'color': '#374151',
+          'white-space': 'nowrap',
+        },
+        zIndex: 110,
+      })
+      map.add(label)
+      planPathLines.push(label)
     }
   }
-  map.setFitView(planPathLines, false, [80, 80, 80, 80])
+
+  if (planPathLines.length > 0) {
+    map.setFitView(planPathLines.filter(l => l instanceof AMap.Polyline), false, [80, 80, 80, 80])
+  }
 }
 
 function clearPlanPath() {

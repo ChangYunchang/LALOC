@@ -56,6 +56,16 @@
         <div class="param-item"><el-checkbox v-model="avoidNoFly">避开禁飞区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidHeightLimit">避开限高区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
+        <div v-if="avoidBuildings" class="param-item param-item--indent">
+          <div class="param-label-row">
+            <span>建议飞行高度</span>
+            <span class="param-hint">低于此高度的建筑物从上方穿越，高层建筑群优先水平绕行</span>
+          </div>
+          <div class="slider-row">
+            <el-slider v-model="suggestedAlt" :min="50" :max="250" :step="10" show-input input-size="small" />
+            <span class="unit">m</span>
+          </div>
+        </div>
         <div class="param-item"><el-checkbox v-model="considerWeather">考虑天气</el-checkbox></div>
       </div>
 
@@ -81,6 +91,14 @@
         </div>
         <div v-if="planResult.warnings?.length > 0" class="warnings">
           <div v-for="(w, i) in planResult.warnings" :key="i" class="warning-item">⚠️ {{ w }}</div>
+        </div>
+        <!-- 飞行阶段图例 -->
+        <div class="phase-legend">
+          <div class="legend-title">飞行阶段</div>
+          <div v-for="(ph, key) in PHASE_LEGEND" :key="key" class="legend-item">
+            <span class="legend-dot" :style="{ background: ph.color }"></span>
+            <span>{{ ph.label }}</span>
+          </div>
         </div>
       </div>
 
@@ -189,6 +207,7 @@ const endPoint = ref(null)
 const waypoints = ref([])
 
 const droneSpeed = ref(15)
+const suggestedAlt = ref(120)
 const avoidNoFly = ref(true)
 const avoidHeightLimit = ref(true)
 const avoidBuildings = ref(true)
@@ -213,6 +232,14 @@ const PHASE_COLORS = {
   descent: '#f59e0b',
   height_limit: '#ef4444',
   building: '#a855f7',
+}
+
+const PHASE_LEGEND = {
+  ascent:     { color: '#22c55e', label: '起飞爬升段' },
+  cruise:     { color: '#3b82f6', label: '巡航段' },
+  descent:    { color: '#f59e0b', label: '降落下降段' },
+  building:   { color: '#a855f7', label: '建筑物避让段' },
+  height_limit: { color: '#ef4444', label: '限高区绕行段' },
 }
 
 // ── 2D/3D 切换时重绘规划路径 ──────────────────
@@ -310,6 +337,7 @@ async function doPlan() {
       end: { ...endPoint.value, alt: 100 },
       waypoints: wpCoords.map(c => ({ ...c, alt: 100 })),
       drone_speed: droneSpeed.value,
+      suggested_alt: suggestedAlt.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
       avoid_buildings: avoidBuildings.value,
@@ -352,8 +380,11 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
     if (m) waypointMarkers.push(m)
   }
 
-  // 绘制路径线
-  mapRef.drawPlanPath(pathPoints, altitudeProfile)
+  // 绘制路径线（传入巡航高度与避障开关，供 3D 细密横向避让使用）
+  mapRef.drawPlanPath(pathPoints, altitudeProfile, {
+    cruiseAlt: suggestedAlt.value,
+    avoidBuildings: avoidBuildings.value,
+  })
 }
 
 function redrawAfterModeSwitch() {
@@ -399,6 +430,12 @@ function formatTime(s) {
 .input-row .el-input { flex: 1; }
 .param-item { margin-bottom: 10px; }
 .param-item span { font-size: 13px; color: #6b7280; }
+.param-item--indent { padding: 8px 10px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; margin-top: -4px; }
+.param-label-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px; }
+.param-hint { font-size: 11px; color: #9ca3af; flex: 1; line-height: 1.3; }
+.slider-row { display: flex; align-items: center; gap: 8px; }
+.slider-row .el-slider { flex: 1; }
+.unit { font-size: 13px; color: #6b7280; flex-shrink: 0; }
 
 .result-section {
   background: #ffffff; border: 1px solid #e5e7eb;
@@ -412,6 +449,11 @@ function formatTime(s) {
 .result-value { font-size: 14px; font-weight: 600; color: #2563eb; }
 .warnings { margin-top: 12px; }
 .warning-item { font-size: 12px; color: #ea580c; margin-bottom: 4px; }
+
+.phase-legend { margin-top: 12px; padding-top: 10px; border-top: 1px solid #f3f4f6; }
+.legend-title { font-size: 11px; font-weight: 600; color: #9ca3af; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+.legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 12px; color: #374151; }
+.legend-dot { width: 28px; height: 5px; border-radius: 3px; flex-shrink: 0; }
 
 .map-area { flex: 1; position: relative; }
 
