@@ -89,8 +89,9 @@
               :class="{
                 'selected': selectedStationId === s.id,
                 'out-range': !s.inRange,
+                'is-planning': planning && selectedStationId === s.id,
               }"
-              @click="s.inRange && selectStation(s.id)">
+              @click="s.inRange && !planning && selectStation(s.id)">
               <span class="stn-rank">{{ i+1 }}</span>
               <div class="stn-info">
                 <div class="stn-name">{{ s.name }}</div>
@@ -105,17 +106,12 @@
         </div>
       </template>
 
-      <!-- 规划按钮 -->
-      <div class="section" v-if="selectedStationId && !emergencyResult">
-        <div class="selected-station-preview">
-          <span>目标：{{ selectedStation?.name }}</span>
-          <span>{{ formatDist(selectedStation?.distance) }}</span>
+      <!-- 规划中状态 -->
+      <div class="section" v-if="planning">
+        <div class="planning-status">
+          <span class="planning-spinner"></span>
+          <span>正在规划航线至 {{ selectedStation?.name }}…</span>
         </div>
-        <el-button type="danger" style="width:100%;margin-top:8px" size="large"
-          :loading="planning" @click="planRoute">
-          🚁 立即规划应急路线
-        </el-button>
-        <el-button style="width:100%;margin-top:6px" size="small" @click="resetAll">取消告警</el-button>
       </div>
 
       <!-- 规划结果 -->
@@ -133,7 +129,8 @@
         <el-button type="primary" size="small" style="width:100%;margin-top:10px" @click="exportRoute">
           导出路线 JSON
         </el-button>
-        <el-button size="small" style="width:100%;margin-top:6px" @click="resetAll">重置</el-button>
+        <el-button size="small" style="width:100%;margin-top:6px" @click="cancelRoute">重新选站</el-button>
+        <el-button size="small" style="width:100%;margin-top:6px" @click="resetAll">取消告警</el-button>
       </div>
     </aside>
 
@@ -481,14 +478,27 @@ function triggerAlert(droneId) {
 }
 
 function selectStation(stationId) {
+  if (planning.value) return
   selectedStationId.value = stationId
+  emergencyResult.value = null
+  routeOverlays.forEach(o => { try { map?.remove(o) } catch {} })
+  routeOverlays = []
+  renderStations()
+  planRoute()
+}
+
+function cancelRoute() {
+  emergencyResult.value = null
+  selectedStationId.value = null
+  routeOverlays.forEach(o => { try { map?.remove(o) } catch {} })
+  routeOverlays = []
   renderStations()
 }
 
 async function planRoute() {
-  if (!alertDrone.value || !selectedStation.value) return
+  if (!alertDrone.value || !selectedStation.value || planning.value) return
   planning.value = true
-  await new Promise(r => setTimeout(r, 900))
+  await new Promise(r => setTimeout(r, 600))
 
   const from = alertDrone.value.position
   const to = { lng: selectedStation.value.lng, lat: selectedStation.value.lat }
@@ -657,11 +667,26 @@ onUnmounted(() => { map?.destroy() })
 .safety-out      { color: #dc2626; }
 .range-note { font-size: 10px; color: #6b7280; text-align: center; padding: 2px 0; }
 
-/* Selected station preview */
-.selected-station-preview {
-  display: flex; justify-content: space-between;
-  padding: 8px 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px;
-  font-size: 12px; color: #15803d; font-weight: 600;
+/* Planning status */
+.planning-status {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; background: #fff7ed; border: 1px solid #fed7aa;
+  border-radius: 8px; font-size: 12px; color: #c2410c; font-weight: 600;
+}
+.planning-spinner {
+  display: inline-block; width: 14px; height: 14px; flex-shrink: 0;
+  border: 2px solid #fed7aa; border-top-color: #ea580c;
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.station-item.is-planning {
+  border-color: #ea580c; background: #fff7ed;
+  animation: planningPulse 1s ease-in-out infinite;
+}
+@keyframes planningPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(234, 88, 12, 0.3); }
+  50%       { box-shadow: 0 0 0 5px rgba(234, 88, 12, 0); }
 }
 
 /* Result box */

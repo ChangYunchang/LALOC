@@ -661,6 +661,8 @@ watch(() => zoneStore.heightLimitZones, () => { renderZones() })
 // ── 规划路径绘制（3D，带高度剖面 + 相位颜色 + 实际建筑高度校正） ──
 
 let planPathEntities = []
+let _planToken = 0   // 每次 planAroundBuildings 调用时递增，旧调用检测到失效后自动退出
+let _drawToken = 0   // 每次 drawPlanPath 调用时递增，过期的异步绘制不再更新画面
 
 // ── 数组平滑工具 ─────────────────────────────────────────
 function _smooth(arr, w) {
@@ -781,6 +783,10 @@ const _mLngRef = _mLng(_REF_LAT)
 
 async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   if (!viewer?.scene?.sampleHeightMostDetailed || !controlPts || controlPts.length < 2) return null
+  // 取消令牌：若新规划在本次完成前启动，live() 返回 false，直接退出
+  const token = ++_planToken
+  const live = () => token === _planToken && viewer && !viewer.isDestroyed()
+  const yld = () => new Promise(r => setTimeout(r, 0))   // 让出主线程（≈0ms，允许浏览器渲染/响应）
   const cruiseAlt = Math.max(30, Math.min(300, opts.cruiseAlt || 120))
   const OVERFLY = opts.overflyMax ?? 20
   const noFlyPolys = opts.avoidNoFly === false ? [] : _buildNoFlyPolys()
@@ -844,7 +850,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
   }
 
-  if (onProgress) onProgress(0.06, needCells.length ? `采样真实建筑（${needCells.length} 点）` : '复用缓存')
+  if (onProgress) onProgress(0.03, needCells.length ? `采样真实建筑（${needCells.length} 点）` : '复用缓存')
   if (needCells.length) {
     const terrainProv = viewer.terrainProvider
     // 地形：仅对需采样点做一次性采样（平缓，足够）；与场景采样并行
@@ -854,7 +860,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
       ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
     const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
     const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
-    if (!viewer || viewer.isDestroyed()) return null
+    if (!live()) return null
     if (scene === null) return null   // 采样失败/瓦片未就绪 → 交回退（不写入错误缓存）
     for (let k = 0; k < needCells.length; k++) {
       const { i } = needCells[k]
@@ -867,8 +873,13 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     if (_bhCache.size > 400000) _bhCache.clear()   // 防无限增长
   }
 
+  // 关键：无论是否采样（缓存全部命中时没有任何 await），都必须在此处让出主线程。
+  // 第二次规划时全部缓存命中，若不 yield，后续 A* 会完全同步运行导致页面卡死。
+  await yld()
+  if (!live()) return null
+
   // ── 3. 障碍栅格：高于可越顶的真实建筑 + 禁飞区 ───────────────
-  if (onProgress) onProgress(0.9, '计算绕行航线')
+  if (onProgress) onProgress(0.44, '规划绕行航线')
   const blocked = new Uint8Array(total)  // 0 通行 / 1 建筑 / 2 禁飞
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const i = r * cols + c
@@ -896,7 +907,8 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   }
 
   // ── 4. 8 方向 A*（保留途经点：逐段规划）──────────────────────
-  const astarSeg = (sCell, gCell) => {
+  // A* 改为 async：每 2000 次迭代 yield 一次，防止长路径/多途经点时主线程阻塞卡死
+  const astarSeg = async (sCell, gCell) => {
     const gKey = gCell.r * cols + gCell.c
     const oct = (r, c) => { const dr = Math.abs(r - gCell.r), dc = Math.abs(c - gCell.c); return cellM * (Math.max(dr, dc) + (Math.SQRT2 - 1) * Math.min(dr, dc)) }
     const open = new _MinHeap(), gS = new Map(), par = new Map()
@@ -904,6 +916,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     gS.set(sKey, 0); open.push({ r: sCell.r, c: sCell.c, f: oct(sCell.r, sCell.c) })
     const closed = new Set(); let guard = 0
     while (open.size && guard++ < total) {
+      if (guard % 500 === 0) { await yld(); if (!live()) return null }
       const cur = open.pop(); const cK = cur.r * cols + cur.c
       if (cK === gKey) { const cells = []; let k = cK; while (k !== undefined) { cells.push({ r: Math.floor(k / cols), c: k % cols }); k = par.get(k) } cells.reverse(); return cells }
       if (closed.has(cK)) continue
@@ -916,7 +929,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
         const nK = nr * cols + nc
         if (closed.has(nK)) continue
         if (nK !== gKey && isBlk(nr, nc)) continue
-        if (dr && dc && (isBlk(cur.r, nc) || isBlk(nr, cur.c))) continue   // 防斜穿障碍角
+        if (dr && dc && (isBlk(cur.r, nc) || isBlk(nr, cur.c))) continue
         const step = (dr && dc) ? cellM * Math.SQRT2 : cellM
         const ng = gc + step
         if (ng < (gS.get(nK) ?? Infinity)) { gS.set(nK, ng); par.set(nK, cK); open.push({ r: nr, c: nc, f: ng + oct(nr, nc) }) }
@@ -943,8 +956,11 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
 
   let feasible = true
   let poly = []
-  for (let s = 0; s < controlPts.length - 1; s++) {
-    const seg = astarSeg(nearestFree(toCell(controlPts[s])), nearestFree(toCell(controlPts[s + 1])))
+  const _segTotal = controlPts.length - 1
+  for (let s = 0; s < _segTotal; s++) {
+    const seg = await astarSeg(nearestFree(toCell(controlPts[s])), nearestFree(toCell(controlPts[s + 1])))
+    if (!live()) return null
+    if (onProgress) onProgress(0.44 + 0.44 * (s + 1) / _segTotal, `绕行规划 ${s + 1}/${_segTotal} 段`)
     let segPts
     if (!seg) { feasible = false; segPts = [controlPts[s], controlPts[s + 1]] }
     else {
@@ -957,6 +973,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     poly = poly.concat(segPts)
   }
 
+  if (onProgress) onProgress(0.91, '平滑航线')
   // ── 5. Chaikin 柔滑 + 均匀重采样 ───────────────────────────
   const chaikin = (pts, it) => {
     let p = pts
@@ -978,6 +995,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   dense[0] = controlPts[0]; dense[dense.length - 1] = controlPts[controlPts.length - 1]
   const n = dense.length
 
+  if (onProgress) onProgress(0.96, '生成高度剖面')
   // ── 6. 高度剖面（平移到巡航高度）+ 绕行段配色 ───────────────
   const ASCENT_R = 0.1, DESCENT_R = 0.1
   const nearBlk = (p, kind) => {
@@ -1095,6 +1113,10 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
 
 // 外部接口：先用服务端剖面立即绘制，再异步用真实 OSM 建筑做细密横向避让重绘
 async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
+  // 绘制令牌：若本次 drawPlanPath 尚未完成时又发起新的，则旧调用在每个 await 后检查并退出
+  const drawToken = ++_drawToken
+  const drawAlive = () => drawToken === _drawToken && viewer && !viewer.isDestroyed()
+
   clearPlanPath()
   if (!viewer || !pathPoints?.length) return
 
@@ -1113,20 +1135,24 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
       const planned = await planAroundBuildings(opts.controlPts, {
         cruiseAlt: opts.cruiseAlt, overflyMax: opts.overflyMax, avoidNoFly: opts.avoidNoFly,
       }, opts.onProgress)
-      if (viewer && !viewer.isDestroyed() && planned && planned.path.length) {
+      if (!drawAlive()) return   // 新规划已触发，丢弃旧结果
+      if (planned && planned.path.length) {
         clearPlanPath()
         _drawPlanPathCore(planned.path, planned.altitude_profile)
         viewer.scene.requestRender()
         return
       }
     } catch { /* 规划失败 → 回退垂直防穿模 */ }
+    if (!drawAlive()) return
     if (opts.onProgress) opts.onProgress(1, '完成')
   }
 
+  if (!drawAlive()) return
   // 回退：保留服务端水平航线，仅做垂直防穿模
   try {
     const corrected = await correctForBuildings(pathPoints, altitudeProfile)
-    if (!viewer || viewer.isDestroyed() || !corrected) return
+    if (!drawAlive()) return
+    if (!corrected) return
     clearPlanPath()
     _drawPlanPathCore(corrected, corrected)
     viewer.scene.requestRender()

@@ -313,13 +313,28 @@ function mockPlanPath(params) {
 
   // 视线串拉（string-pulling）：消除栅格 A* 的 45°/90° 阶梯锯齿。
   // 从当前点尽量直连最远的后续点，只要直线不穿障碍就跳过中间台阶点，得到任意角度直线。
+  //
+  // 注意：A* 用 blockKind（含 NF_MARGIN=150m 缓冲带）保证路径远离禁飞区，
+  // 但 lineClear 若也使用完整缓冲带，则任何穿越缓冲带的"抄近路"都会被拒绝，
+  // 导致串拉对禁飞区绕行路径完全失效，剩下密集阶梯折线 → Chaikin 柔滑后形成剧烈 45° 震荡。
+  // 修复：串拉只检查真实障碍（建筑高度 + 禁飞多边形内部），不再包含缓冲带，
+  // A* 已建立的安全间距不需要在串拉阶段重复强制。
   const lineClear = (a, b) => {
     const d = haversine(a, b)
     const steps = Math.max(1, Math.ceil(d / (cellM * 0.5)))
     for (let s = 1; s < steps; s++) {
       const t = s / steps
-      const c = toCell({ lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t })
-      if (blockKind(c.r, c.c)) return false
+      const lng = a.lng + (b.lng - a.lng) * t
+      const lat = a.lat + (b.lat - a.lat) * t
+      // 建筑障碍：按实际坐标高度判定
+      if (doBuild && getBuildingHeight(lng, lat) > BUILD_OVERFLY) return false
+      // 禁飞区：只检查多边形内部（不含缓冲带），允许直线穿越缓冲带外圈
+      if (doNoFly) {
+        for (const poly of NO_FLY_POLYS) {
+          if (lng < poly.minLng || lng > poly.maxLng || lat < poly.minLat || lat > poly.maxLat) continue
+          if (pointInPoly(lng, lat, poly)) return false
+        }
+      }
     }
     return true
   }

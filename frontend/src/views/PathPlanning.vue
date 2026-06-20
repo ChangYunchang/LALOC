@@ -340,6 +340,8 @@ function removeWaypoint(i) { waypoints.value.splice(i, 1) }
 async function doPlan() {
   if (!startPoint.value || !endPoint.value) { ElMessage.warning('请先设置起点和终点'); return }
   planning.value = true
+  planProgress.value = 3
+  planProgressLabel.value = '正在请求规划数据...'
   try {
     const wpCoords = waypoints.value.map(wp => parseCoords(wp.input)).filter(Boolean)
     const result = await planPath({
@@ -356,6 +358,7 @@ async function doPlan() {
     // 起点/途经点/终点落在禁飞区内 → 拒绝规划并弹窗提示
     if (result.blocked_in_no_fly) {
       planResult.value = null
+      planProgress.value = null
       clearOldPath()
       mapContainerRef.value?.clearPlanPath?.()
       const names = (result.blocked_points || []).map(b => b.label).join('、')
@@ -370,6 +373,7 @@ async function doPlan() {
     drawRouteOnMap(result.path, result.altitude_profile)
     ElMessage.success('路径规划完成')
   } catch (e) {
+    planProgress.value = null
     ElMessage.error('路径规划失败: ' + (e.message || '未知错误'))
   } finally { planning.value = false }
 }
@@ -411,17 +415,29 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   ]
 
   // 绘制路径线（传入巡航高度/避障开关/控制点/进度回调，供 3D 真实建筑绕行规划使用）
-  mapRef.drawPlanPath(pathPoints, altitudeProfile, {
-    cruiseAlt: suggestedAlt.value,
-    avoidBuildings: avoidBuildings.value,
-    avoidNoFly: avoidNoFly.value,
-    controlPts,
-    onProgress: (frac, label) => {
-      planProgress.value = Math.round(frac * 100)
-      planProgressLabel.value = label || ''
-      if (frac >= 1) setTimeout(() => { planProgress.value = null }, 600)
-    },
-  })
+  if (mapRef.viewMode === '3D') {
+    planProgress.value = 18
+    planProgressLabel.value = '计算真实建筑绕行航线'
+    mapRef.drawPlanPath(pathPoints, altitudeProfile, {
+      cruiseAlt: suggestedAlt.value,
+      avoidBuildings: avoidBuildings.value,
+      avoidNoFly: avoidNoFly.value,
+      controlPts,
+      onProgress: (frac, label) => {
+        planProgress.value = Math.round(18 + frac * 82)
+        planProgressLabel.value = label || ''
+        if (frac >= 1) setTimeout(() => { planProgress.value = null }, 800)
+      },
+    })
+  } else {
+    mapRef.drawPlanPath(pathPoints, altitudeProfile, {
+      cruiseAlt: suggestedAlt.value,
+      avoidBuildings: avoidBuildings.value,
+      avoidNoFly: avoidNoFly.value,
+      controlPts,
+    })
+    planProgress.value = null
+  }
 }
 
 function redrawAfterModeSwitch() {

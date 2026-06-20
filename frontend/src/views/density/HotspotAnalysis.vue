@@ -52,9 +52,13 @@
           </div>
           <div class="hs-detail">
             <div class="hs-stat"><span>过境次数</span><strong>{{ hs.count }}次/时</strong></div>
-            <div class="hs-stat"><span>涉及航线</span><strong>{{ hs.routes }}条</strong></div>
             <div class="hs-stat"><span>高峰时段</span><strong>{{ hs.peak }}</strong></div>
             <div class="hs-stat"><span>区域坐标</span><strong>{{ hs.coordStr }}</strong></div>
+          </div>
+          <div class="hs-routes">
+            <span class="routes-label">交汇航线（{{ hs.routes }}条）：</span>
+            <span v-for="name in hs.routeNames" :key="name" class="route-tag"
+              :style="{ background: routeColor(name) }">{{ name }}</span>
           </div>
         </div>
         <div v-if="!hotspots.length" class="empty-tip">点击「识别拥堵区域」开始分析</div>
@@ -125,16 +129,38 @@ let AMap = null, amapInst = null, infoWindow = null
 let overlays = []
 let cesiumViewer = null
 
-const HOTSPOT_DEFINITIONS = [
-  { id: 1, name: '天河中心枢纽', lng: 113.3245, lat: 23.1201, baseCount: { all: 68, morning: 85, noon: 42, evening: 91 }, routes: 6, peak: '18:00-19:00', level: 'high' },
-  { id: 2, name: '白云东路交汇点', lng: 113.3100, lat: 23.1050, baseCount: { all: 54, morning: 72, noon: 38, evening: 76 }, routes: 5, peak: '08:30-09:30', level: 'high' },
-  { id: 3, name: '荔湾航路交叉区', lng: 113.2994, lat: 23.1380, baseCount: { all: 41, morning: 55, noon: 28, evening: 60 }, routes: 4, peak: '08:00-10:00', level: 'medium' },
-  { id: 4, name: '番禺物流节点', lng: 113.2671, lat: 23.0900, baseCount: { all: 37, morning: 48, noon: 30, evening: 52 }, routes: 3, peak: '14:00-16:00', level: 'medium' },
-  { id: 5, name: '黄埔东部走廊', lng: 113.3580, lat: 23.1050, baseCount: { all: 29, morning: 38, noon: 22, evening: 44 }, routes: 3, peak: '09:00-10:00', level: 'medium' },
-  { id: 6, name: '越秀纵向通道', lng: 113.3100, lat: 23.1380, baseCount: { all: 25, morning: 32, noon: 18, evening: 38 }, routes: 3, peak: '18:30-19:30', level: 'medium' },
-  { id: 7, name: '南沙新区起降点', lng: 113.3900, lat: 23.1380, baseCount: { all: 18, morning: 22, noon: 14, evening: 26 }, routes: 2, peak: '10:00-11:00', level: 'low' },
-  { id: 8, name: '海珠低密区', lng: 113.2671, lat: 23.1050, baseCount: { all: 12, morning: 16, noon: 10, evening: 18 }, routes: 2, peak: '14:00-15:00', level: 'low' },
+// 与 DensityContour.vue 共享同一航线骨架
+const ROUTES = [
+  { id: 0, name: '番禺→天河干线', pts: [[113.2671,23.0900],[113.2900,23.0980],[113.3100,23.1050],[113.3245,23.1201]], color: '#3b82f6' },
+  { id: 1, name: '白云→天河横线', pts: [[113.2994,23.1540],[113.3100,23.1380],[113.3245,23.1201],[113.3400,23.1050]], color: '#8b5cf6' },
+  { id: 2, name: '黄埔→白云线',   pts: [[113.3580,23.1050],[113.3400,23.1201],[113.3245,23.1201],[113.3100,23.1050]], color: '#10b981' },
+  { id: 3, name: '南沙→黄埔线',   pts: [[113.3900,23.1380],[113.3700,23.1300],[113.3580,23.1050],[113.3400,23.0900]], color: '#f59e0b' },
+  { id: 4, name: '荔湾→天河线',   pts: [[113.2671,23.1380],[113.2800,23.1250],[113.3100,23.1201],[113.3245,23.1050]], color: '#ec4899' },
+  { id: 5, name: '越秀纵向线',     pts: [[113.3100,23.0750],[113.3100,23.1050],[113.3100,23.1380],[113.3100,23.1600]], color: '#06b6d4' },
+  { id: 6, name: '白云横向线',     pts: [[113.2500,23.1050],[113.2671,23.1050],[113.2994,23.1050],[113.3245,23.1050]], color: '#f97316' },
+  { id: 7, name: '天河→黄埔线',   pts: [[113.3245,23.1201],[113.3400,23.1380],[113.3580,23.1500],[113.3800,23.1600]], color: '#64748b' },
+  { id: 8, name: '番禺→天河南线', pts: [[113.2994,23.0750],[113.3100,23.0900],[113.3245,23.1050],[113.3400,23.1201]], color: '#dc2626' },
 ]
+
+// 每个热点对应真实的航线交汇节点，routeIds 标注哪些航线在此相交
+const HOTSPOT_DEFINITIONS = [
+  { id: 1, name: '天河中心枢纽',   lng: 113.3245, lat: 23.1201, baseCount: { all: 68, morning: 85, noon: 42, evening: 91 }, routeIds: [0,1,2,7,8], peak: '18:00-19:00', level: 'high' },
+  { id: 2, name: '白云东路交汇点', lng: 113.3100, lat: 23.1050, baseCount: { all: 54, morning: 72, noon: 38, evening: 76 }, routeIds: [0,2,5,6],   peak: '08:30-09:30', level: 'high' },
+  { id: 3, name: '荔湾航路交叉区', lng: 113.2994, lat: 23.1380, baseCount: { all: 41, morning: 55, noon: 28, evening: 60 }, routeIds: [1,4,5],     peak: '08:00-10:00', level: 'medium' },
+  { id: 4, name: '天河南部节点',   lng: 113.3245, lat: 23.1050, baseCount: { all: 37, morning: 48, noon: 30, evening: 52 }, routeIds: [4,6,8],     peak: '14:00-16:00', level: 'medium' },
+  { id: 5, name: '黄埔东部走廊',   lng: 113.3580, lat: 23.1050, baseCount: { all: 29, morning: 38, noon: 22, evening: 44 }, routeIds: [2,3],       peak: '09:00-10:00', level: 'medium' },
+  { id: 6, name: '越秀纵向通道',   lng: 113.3100, lat: 23.1380, baseCount: { all: 25, morning: 32, noon: 18, evening: 38 }, routeIds: [1,4,5],     peak: '18:30-19:30', level: 'medium' },
+  { id: 7, name: '南沙新区起降点', lng: 113.3900, lat: 23.1380, baseCount: { all: 18, morning: 22, noon: 14, evening: 26 }, routeIds: [3,7],       peak: '10:00-11:00', level: 'low' },
+  { id: 8, name: '番禺物流起点',   lng: 113.2671, lat: 23.0900, baseCount: { all: 12, morning: 16, noon: 10, evening: 18 }, routeIds: [0],         peak: '14:00-15:00', level: 'low' },
+]
+
+function getRouteNames(routeIds) {
+  return routeIds.map(id => ROUTES.find(r => r.id === id)?.name).filter(Boolean)
+}
+
+function routeColor(name) {
+  return ROUTES.find(r => r.name === name)?.color || '#6b7280'
+}
 
 const maxDensity = computed(() => hotspots.value.length ? Math.max(...hotspots.value.map(h => h.count)) : 0)
 
@@ -142,7 +168,13 @@ const maxDensity = computed(() => hotspots.value.length ? Math.max(...hotspots.v
 function runAnalysis() {
   const period = selectedPeriod.value
   const filtered = HOTSPOT_DEFINITIONS
-    .map(def => ({ ...def, count: def.baseCount[period], coordStr: `${def.lng.toFixed(4)}, ${def.lat.toFixed(4)}` }))
+    .map(def => ({
+      ...def,
+      count: def.baseCount[period],
+      routes: def.routeIds.length,
+      routeNames: getRouteNames(def.routeIds),
+      coordStr: `${def.lng.toFixed(4)}, ${def.lat.toFixed(4)}`,
+    }))
     .filter(hs => hs.count >= densityThreshold.value)
     .sort((a, b) => b.count - a.count)
 
@@ -160,9 +192,41 @@ function clearOverlays() {
   infoWindow?.close()
 }
 
+function drawRouteLines2D() {
+  if (!amapInst || !AMap) return
+  ROUTES.forEach(route => {
+    const line = new AMap.Polyline({
+      path: route.pts.map(([lng, lat]) => [lng, lat]),
+      strokeColor: route.color,
+      strokeWeight: 2,
+      strokeOpacity: 0.45,
+      strokeStyle: 'dashed',
+      strokeDasharray: [6, 4],
+      lineJoin: 'round',
+      zIndex: 5,
+    })
+    amapInst.add(line)
+    overlays.push(line)
+    // 航线名称标注（线段中点）
+    const mid = route.pts[Math.floor(route.pts.length / 2)]
+    const label = new AMap.Text({
+      text: route.name,
+      position: mid,
+      style: { background: 'transparent', border: 'none', fontSize: '10px', color: route.color, fontWeight: '600', whiteSpace: 'nowrap' },
+      offset: new AMap.Pixel(0, -10),
+      zIndex: 6,
+    })
+    amapInst.add(label)
+    overlays.push(label)
+  })
+}
+
 function renderHotspots2D(list) {
   if (!amapInst || !AMap) return
   clearOverlays()
+  // 先绘制航线参考线
+  drawRouteLines2D()
+
   list.forEach(hs => {
     const colorMap = { high: '#dc2626', medium: '#f59e0b', low: '#3b82f6' }
     const color = colorMap[hs.level]
@@ -173,6 +237,7 @@ function renderHotspots2D(list) {
       center: [hs.lng, hs.lat], radius: hotspotRadius.value * radiusScale,
       strokeColor: color, strokeWeight: 2, strokeOpacity: 0.9,
       fillColor: color, fillOpacity: 0.2,
+      zIndex: 10,
     })
     amapInst.add(circle)
     overlays.push(circle)
@@ -183,16 +248,22 @@ function renderHotspots2D(list) {
         ${hs.count}次/时<br><span style="font-size:10px;font-weight:400">${hs.name}</span>
       </div>`,
       offset: new AMap.Pixel(-30, -32),
+      zIndex: 20,
     })
     marker.on('click', () => {
       if (!infoWindow) infoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -40), closeWhenClickMap: true })
+      const routeTagsHtml = (hs.routeNames || []).map((n, i) => {
+        const c = ROUTES.find(r => r.name === n)?.color || '#6b7280'
+        return `<span style="display:inline-block;background:${c};color:#fff;border-radius:3px;padding:1px 5px;font-size:10px;margin:1px">${n}</span>`
+      }).join('')
       infoWindow.setContent(`
-        <div style="padding:8px;font-size:12px;min-width:180px">
+        <div style="padding:8px;font-size:12px;min-width:200px">
           <strong style="font-size:13px">${hs.name}</strong>
           <div style="margin-top:6px;color:#374151">
             <div>过境次数：<b>${hs.count}次/时</b></div>
-            <div>涉及航线：<b>${hs.routes}条</b></div>
-            <div>高峰时段：<b>${hs.peak}</b></div>
+            <div style="margin-top:4px">交汇航线（${hs.routes}条）：</div>
+            <div style="margin-top:4px;line-height:1.8">${routeTagsHtml}</div>
+            <div style="margin-top:4px">高峰时段：<b>${hs.peak}</b></div>
             <div>密度级别：<b style="color:${color}">${hs.level === 'high' ? '高密度' : hs.level === 'medium' ? '中密度' : '低密度'}</b></div>
           </div>
         </div>`)
@@ -239,23 +310,38 @@ function renderHotspots3D(list) {
   cesiumViewer.entities.removeAll()
   if (!list.length) return
 
+  // 先绘制航线走廊参考线（低空 60m）
+  ROUTES.forEach(route => {
+    const positions = route.pts.flatMap(([lng, lat]) => [lng, lat, 60])
+    cesiumViewer.entities.add({
+      polyline: {
+        positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
+        width: 2,
+        material: new Cesium.PolylineDashMaterialProperty({
+          color: Cesium.Color.fromCssColorString(route.color).withAlpha(0.5),
+          dashLength: 14,
+        }),
+        clampToGround: false,
+      },
+    })
+  })
+
+  // 再绘制热点密度柱体
   const maxCount = Math.max(...list.map(h => h.count))
   list.forEach(hs => {
     const h = Math.max(40, (hs.count / maxCount) * 220)
     const color = Cesium.Color.fromCssColorString(LEVEL_COLORS[hs.level]).withAlpha(0.82)
     const r = hotspotRadius.value * 0.3
-
-    // 密度柱体
     cesiumViewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(hs.lng, hs.lat, h / 2),
       cylinder: { length: h, topRadius: r, bottomRadius: r, material: color, outline: false },
     })
-    // 柱顶标注
+    const routeLabel = (hs.routeNames || []).slice(0, 3).join(' / ')
     cesiumViewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(hs.lng, hs.lat, h + 30),
       label: {
-        text: `${hs.name}\n${hs.count}次/时`,
-        font: '12px PingFang SC, sans-serif',
+        text: `${hs.name}\n${hs.count}次/时  ${hs.routes}条航线\n${routeLabel}`,
+        font: '11px PingFang SC, sans-serif',
         fillColor: Cesium.Color.WHITE,
         style: Cesium.LabelStyle.FILL_AND_OUTLINE,
         outlineColor: Cesium.Color.BLACK,
@@ -356,6 +442,9 @@ onUnmounted(() => {
 .hs-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
 .hs-stat { font-size: 11px; color: #6b7280; }
 .hs-stat strong { color: #374151; }
+.hs-routes { margin-top: 6px; }
+.routes-label { font-size: 10px; color: #9ca3af; display: block; margin-bottom: 3px; }
+.route-tag { display: inline-block; color: #fff; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin: 1px 2px 1px 0; white-space: nowrap; }
 .empty-tip { font-size: 12px; color: #9ca3af; text-align: center; padding: 16px 0; }
 .map-area { flex: 1; position: relative; }
 .map-container { width: 100%; height: 100%; }
