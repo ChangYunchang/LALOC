@@ -35,16 +35,10 @@ const routes = [
 
   // ── 子系统 3：无人机安全缓冲区分析 ─────────────
   {
-    path: '/safety-buffer/config',
-    name: 'SafetyBufferConfig',
-    component: () => import('@/views/safety-buffer/SafetyBufferConfig.vue'),
-    meta: { title: '安全范围配置', subsystem: '安全缓冲分析' },
-  },
-  {
-    path: '/safety-buffer/overlap',
-    name: 'BufferOverlapAnalysis',
-    component: () => import('@/views/safety-buffer/BufferOverlapAnalysis.vue'),
-    meta: { title: '缓冲区重叠分析', subsystem: '安全缓冲分析' },
+    path: '/safety-buffer/analysis',
+    name: 'SafetyBufferAnalysis',
+    component: () => import('@/views/safety-buffer/SafetyBufferAnalysis.vue'),
+    meta: { title: '安全缓冲区分析', subsystem: '安全缓冲分析' },
   },
 
   // ── 子系统 4：安全风险热力分析（6.3）+ 低空拥堵识别（6.2）+ 区域密度统计（7.1.3）

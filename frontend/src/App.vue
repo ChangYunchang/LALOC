@@ -93,8 +93,7 @@ const dropdownMenus = [
     icon: 'Lock',
     paths: ['/safety-buffer'],
     children: [
-      { path: '/safety-buffer/config', label: '安全范围配置' },
-      { path: '/safety-buffer/overlap', label: '缓冲区重叠分析' },
+      { path: '/safety-buffer/analysis', label: '安全缓冲区分析' },
     ],
   },
   {
