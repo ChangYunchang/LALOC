@@ -90,6 +90,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
+import { DENSITY_ROUTES } from '@/data/sampleRoutes'
 import { ElMessage } from 'element-plus'
 
 let Cesium = null
@@ -129,18 +130,7 @@ let AMap = null, amapInst = null, infoWindow = null
 let overlays = []
 let cesiumViewer = null
 
-// 与 DensityContour.vue 共享同一航线骨架
-const ROUTES = [
-  { id: 0, name: '番禺→天河干线', pts: [[113.2671,23.0900],[113.2900,23.0980],[113.3100,23.1050],[113.3245,23.1201]], color: '#3b82f6' },
-  { id: 1, name: '白云→天河横线', pts: [[113.2994,23.1540],[113.3100,23.1380],[113.3245,23.1201],[113.3400,23.1050]], color: '#8b5cf6' },
-  { id: 2, name: '黄埔→白云线',   pts: [[113.3580,23.1050],[113.3400,23.1201],[113.3245,23.1201],[113.3100,23.1050]], color: '#10b981' },
-  { id: 3, name: '南沙→黄埔线',   pts: [[113.3900,23.1380],[113.3700,23.1300],[113.3580,23.1050],[113.3400,23.0900]], color: '#f59e0b' },
-  { id: 4, name: '荔湾→天河线',   pts: [[113.2671,23.1380],[113.2800,23.1250],[113.3100,23.1201],[113.3245,23.1050]], color: '#ec4899' },
-  { id: 5, name: '越秀纵向线',     pts: [[113.3100,23.0750],[113.3100,23.1050],[113.3100,23.1380],[113.3100,23.1600]], color: '#06b6d4' },
-  { id: 6, name: '白云横向线',     pts: [[113.2500,23.1050],[113.2671,23.1050],[113.2994,23.1050],[113.3245,23.1050]], color: '#f97316' },
-  { id: 7, name: '天河→黄埔线',   pts: [[113.3245,23.1201],[113.3400,23.1380],[113.3580,23.1500],[113.3800,23.1600]], color: '#64748b' },
-  { id: 8, name: '番禺→天河南线', pts: [[113.2994,23.0750],[113.3100,23.0900],[113.3245,23.1050],[113.3400,23.1201]], color: '#dc2626' },
-]
+const ROUTES = DENSITY_ROUTES
 
 // 每个热点对应真实的航线交汇节点，routeIds 标注哪些航线在此相交
 const HOTSPOT_DEFINITIONS = [

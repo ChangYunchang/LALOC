@@ -105,11 +105,13 @@ import { getAllRoutes } from '@/api/routes'
 import MapContainer from '@/components/MapContainer.vue'
 import WeatherPanel from '@/components/WeatherPanel.vue'
 import TimelineSlider from '@/components/TimelineSlider.vue'
+import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 const zoneStore = useZoneStore()
 const mapStore = useMapStore()
 const apiRoutes = ref([])
-const routes = computed(() => [...apiRoutes.value, ...mapStore.savedRoutes])
+// SAMPLE_ROUTES 作为基础示例航线（含完整高度剖面），API 额外航线追加在后
+const routes = computed(() => [...SAMPLE_ROUTES, ...apiRoutes.value, ...mapStore.savedRoutes])
 const selectedRoute = ref(null)
 const mapContainerRef = ref(null)
 
