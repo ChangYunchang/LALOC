@@ -1,7 +1,6 @@
 <!--
   低空拥堵识别（6.2）— 6.2.1 任务密度计算 / 6.2.2 拥堵阈值判断
   2D：AMap 彩色热点圆 + 信息窗口
-  3D：Cesium OSM 建筑场景 + 密度柱体实体
 -->
 <template>
   <div class="hotspot-page">
@@ -67,19 +66,7 @@
 
     <!-- 右侧地图 -->
     <div class="map-area">
-      <!-- 2D/3D 切换 -->
-      <div class="mode-toggle">
-        <el-button-group size="small">
-          <el-button :type="viewMode === '2D' ? 'primary' : 'default'" @click="switchMode('2D')">2D 平面</el-button>
-          <el-button :type="viewMode === '3D' ? 'primary' : 'default'" @click="switchMode('3D')">3D 实景</el-button>
-        </el-button-group>
-      </div>
-
-      <!-- AMap 2D -->
-      <div v-if="viewMode === '2D'" ref="mapRef" class="map-container"></div>
-      <!-- Cesium 3D -->
-      <div v-if="viewMode === '3D'" ref="cesiumRef" class="map-container"></div>
-
+      <div ref="mapRef" class="map-container"></div>
       <div v-if="hotspots.length" class="map-summary">
         高峰期最大过境密度：<strong>{{ maxDensity }}</strong> 次/时
       </div>
@@ -88,47 +75,18 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { DENSITY_ROUTES } from '@/data/sampleRoutes'
 import { ElMessage } from 'element-plus'
-
-let Cesium = null
-async function loadCesium() {
-  if (Cesium) return Cesium
-  window.CESIUM_BASE_URL = '/cesium/'
-  if (!document.querySelector('link[data-cesium]')) {
-    const link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = '/cesium/Widgets/widgets.css'
-    link.setAttribute('data-cesium', '1')
-    document.head.appendChild(link)
-  }
-  if (!window.Cesium) {
-    await new Promise((resolve, reject) => {
-      if (document.querySelector('script[data-cesium]')) { resolve(); return }
-      const script = document.createElement('script')
-      script.src = '/cesium/Cesium.js'
-      script.setAttribute('data-cesium', '1')
-      script.onload = resolve
-      script.onerror = () => reject(new Error('Cesium.js load failed'))
-      document.head.appendChild(script)
-    })
-  }
-  Cesium = window.Cesium
-  return Cesium
-}
 
 const densityThreshold = ref(20)
 const hotspotRadius = ref(500)
 const selectedPeriod = ref('all')
 const hotspots = ref([])
-const viewMode = ref('2D')
 const mapRef = ref(null)
-const cesiumRef = ref(null)
 let AMap = null, amapInst = null, infoWindow = null
 let overlays = []
-let cesiumViewer = null
 
 const ROUTES = DENSITY_ROUTES
 
@@ -169,9 +127,7 @@ function runAnalysis() {
     .sort((a, b) => b.count - a.count)
 
   hotspots.value = filtered
-  if (viewMode.value === '2D') renderHotspots2D(filtered)
-  else renderHotspots3D(filtered)
-
+  renderHotspots2D(filtered)
   ElMessage({ type: 'success', message: `识别到 ${filtered.length} 个拥堵区域（阈值 ≥ ${densityThreshold.value} 次/时）` })
 }
 
@@ -197,7 +153,6 @@ function drawRouteLines2D() {
     })
     amapInst.add(line)
     overlays.push(line)
-    // 航线名称标注（线段中点）
     const mid = route.pts[Math.floor(route.pts.length / 2)]
     const label = new AMap.Text({
       text: route.name,
@@ -214,7 +169,6 @@ function drawRouteLines2D() {
 function renderHotspots2D(list) {
   if (!amapInst || !AMap) return
   clearOverlays()
-  // 先绘制航线参考线
   drawRouteLines2D()
 
   list.forEach(hs => {
@@ -242,7 +196,7 @@ function renderHotspots2D(list) {
     })
     marker.on('click', () => {
       if (!infoWindow) infoWindow = new AMap.InfoWindow({ offset: new AMap.Pixel(0, -40), closeWhenClickMap: true })
-      const routeTagsHtml = (hs.routeNames || []).map((n, i) => {
+      const routeTagsHtml = (hs.routeNames || []).map(n => {
         const c = ROUTES.find(r => r.name === n)?.color || '#6b7280'
         return `<span style="display:inline-block;background:${c};color:#fff;border-radius:3px;padding:1px 5px;font-size:10px;margin:1px">${n}</span>`
       }).join('')
@@ -276,137 +230,24 @@ async function initAMap() {
       mapStyle: 'amap://styles/whitesmoke',
     })
     amapInst.addControl(new AMap.Scale({ position: 'LB' }))
-    if (hotspots.value.length) renderHotspots2D(hotspots.value)
-    else runAnalysis()
+    runAnalysis()
   } catch (e) { console.error('AMap init failed:', e) }
 }
 
-function destroyAMap() {
+function focusHotspot(hs) {
+  if (amapInst) {
+    amapInst.setCenter([hs.lng, hs.lat])
+    amapInst.setZoom(14)
+  }
+}
+
+onMounted(() => initAMap())
+
+onUnmounted(() => {
   infoWindow = null
   overlays = []
   amapInst?.destroy()
   amapInst = null
-}
-
-// ── Cesium 3D 渲染 ────────────────────────────────────
-const LEVEL_COLORS = {
-  high: '#dc2626',
-  medium: '#f59e0b',
-  low: '#3b82f6',
-}
-
-function renderHotspots3D(list) {
-  if (!cesiumViewer) return
-  cesiumViewer.entities.removeAll()
-  if (!list.length) return
-
-  // 先绘制航线走廊参考线（低空 60m）
-  ROUTES.forEach(route => {
-    const positions = route.pts.flatMap(([lng, lat]) => [lng, lat, 60])
-    cesiumViewer.entities.add({
-      polyline: {
-        positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
-        width: 2,
-        material: new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.fromCssColorString(route.color).withAlpha(0.5),
-          dashLength: 14,
-        }),
-        clampToGround: false,
-      },
-    })
-  })
-
-  // 再绘制热点密度柱体
-  const maxCount = Math.max(...list.map(h => h.count))
-  list.forEach(hs => {
-    const h = Math.max(40, (hs.count / maxCount) * 220)
-    const color = Cesium.Color.fromCssColorString(LEVEL_COLORS[hs.level]).withAlpha(0.82)
-    const r = hotspotRadius.value * 0.3
-    cesiumViewer.entities.add({
-      position: Cesium.Cartesian3.fromDegrees(hs.lng, hs.lat, h / 2),
-      cylinder: { length: h, topRadius: r, bottomRadius: r, material: color, outline: false },
-    })
-    const routeLabel = (hs.routeNames || []).slice(0, 3).join(' / ')
-    cesiumViewer.entities.add({
-      position: Cesium.Cartesian3.fromDegrees(hs.lng, hs.lat, h + 30),
-      label: {
-        text: `${hs.name}\n${hs.count}次/时  ${hs.routes}条航线\n${routeLabel}`,
-        font: '11px PingFang SC, sans-serif',
-        fillColor: Cesium.Color.WHITE,
-        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-        outlineColor: Cesium.Color.BLACK,
-        outlineWidth: 1,
-        backgroundColor: color.withAlpha(0.75),
-        showBackground: true,
-        backgroundPadding: new Cesium.Cartesian2(5, 3),
-        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-        pixelOffset: new Cesium.Cartesian2(0, -4),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      },
-    })
-  })
-  cesiumViewer.scene.requestRender()
-}
-
-async function initCesium() {
-  if (!cesiumRef.value) return
-  await loadCesium()
-  Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
-  cesiumViewer = new Cesium.Viewer(cesiumRef.value, {
-    terrain: Cesium.Terrain.fromWorldTerrain(),
-    baseLayerPicker: false, geocoder: false, homeButton: false,
-    sceneModePicker: false, navigationHelpButton: false,
-    animation: false, timeline: false, fullscreenButton: false,
-    infoBox: false, selectionIndicator: false,
-  })
-  try {
-    const tileset = await Cesium.createOsmBuildingsAsync()
-    cesiumViewer.scene.primitives.add(tileset)
-  } catch {}
-  cesiumViewer.camera.setView({
-    destination: Cesium.Cartesian3.fromDegrees(113.3100, 23.1150, 9000),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-50), roll: 0 },
-  })
-  if (hotspots.value.length) renderHotspots3D(hotspots.value)
-  else runAnalysis()
-}
-
-function destroyCesium() {
-  if (cesiumViewer && !cesiumViewer.isDestroyed()) cesiumViewer.destroy()
-  cesiumViewer = null
-}
-
-// ── 模式切换 ─────────────────────────────────────────
-function switchMode(mode) {
-  if (viewMode.value === mode) return
-  if (mode === '3D') {
-    destroyAMap()
-    viewMode.value = '3D'
-  } else {
-    destroyCesium()
-    viewMode.value = '2D'
-  }
-}
-
-watch(mapRef, async (el) => { if (el) { await nextTick(); initAMap() } })
-watch(cesiumRef, async (el) => { if (el) { await nextTick(); initCesium() } })
-
-function focusHotspot(hs) {
-  if (viewMode.value === '2D' && amapInst) {
-    amapInst.setCenter([hs.lng, hs.lat])
-    amapInst.setZoom(14)
-  } else if (cesiumViewer) {
-    cesiumViewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(hs.lng, hs.lat, 2000),
-      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
-      duration: 1.5,
-    })
-  }
-}
-
-onUnmounted(() => {
-  destroyAMap()
-  destroyCesium()
 })
 </script>
 
@@ -438,9 +279,6 @@ onUnmounted(() => {
 .empty-tip { font-size: 12px; color: #9ca3af; text-align: center; padding: 16px 0; }
 .map-area { flex: 1; position: relative; }
 .map-container { width: 100%; height: 100%; }
-.mode-toggle {
-  position: absolute; top: 14px; left: 14px; z-index: 200;
-}
 .map-summary {
   position: absolute; top: 14px; right: 16px; background: rgba(255,255,255,0.95);
   border-radius: 8px; padding: 8px 14px; font-size: 13px;
