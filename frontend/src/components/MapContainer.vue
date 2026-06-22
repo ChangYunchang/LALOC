@@ -108,6 +108,11 @@ defineExpose({
   clearCustomMarkers: (...args) => getActive()?.clearCustomMarkers(...args),
   drawPlanPath: (...args) => getActive()?.drawPlanPath(...args),
   clearPlanPath: (...args) => getActive()?.clearPlanPath(...args),
+  startDrawLine: (...args) => getActive()?.startDrawLine(...args),
+  startDrawPolygon: (...args) => getActive()?.startDrawPolygon(...args),
+  stopDrawing: (...args) => getActive()?.stopDrawing(...args),
+  clearDrawing: (...args) => getActive()?.clearDrawing(...args),
+  getViewer: () => getActive()?.getViewer?.() || null,
 })
 </script>
 

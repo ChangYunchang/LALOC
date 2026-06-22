@@ -2,7 +2,24 @@
   <div class="path-planning">
     <!-- 左侧控制面板 -->
     <aside class="control-panel">
-      <div class="panel-section">
+      <!-- ═══ 规划模式选择器（顶层） ═══ -->
+      <div class="mode-selector">
+        <el-radio-group v-model="planningMode" size="small">
+          <el-radio-button value="points">📍 选点规划</el-radio-button>
+          <el-radio-button value="patrol">🌲 林场/农田巡视巡逻</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <!-- ═══ 巡逻子模式选择 ═══ -->
+      <div v-if="planningMode === 'patrol'" class="mode-selector sub-selector">
+        <el-radio-group v-model="patrolMode" size="small">
+          <el-radio-button value="line">✈️ 沿线飞行</el-radio-button>
+          <el-radio-button value="polygon">🔷 空域巡回</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <!-- ═══ 选点规划：起终点设置 ═══ -->
+      <div v-if="planningMode === 'points'" class="panel-section">
         <h3 class="section-title">📍 起终点设置</h3>
 
         <div class="point-input">
@@ -47,29 +64,116 @@
         </div>
       </div>
 
+      <!-- ═══ 沿线飞行设置 ═══ -->
+      <div v-if="planningMode === 'patrol' && patrolMode === 'line'" class="panel-section">
+        <h3 class="section-title">✈️ 沿线飞行设置</h3>
+        <p class="mode-desc">在地图上绘制飞行线，系统将沿线生成巡视航线，自动跟随地形起伏</p>
+        <el-button
+          @click="startLineDrawing"
+          :type="isDrawingLine ? 'warning' : 'primary'"
+          style="width:100%;margin-bottom:8px"
+        >
+          {{ isDrawingLine ? '取消绘制' : '开始绘制飞行线' }}
+        </el-button>
+        <p v-if="isDrawingLine" class="drawing-hint">
+          🖱️ 左键点击添加顶点 · 右键/Enter 完成 · Esc 取消
+        </p>
+        <div v-if="linePath" class="drawing-status">
+          <span>✅ 已绘制 <strong>{{ linePath.length }}</strong> 个航路点</span>
+          <el-button size="small" text type="danger" @click="clearLine">清除重绘</el-button>
+        </div>
+      </div>
+
+      <!-- ═══ 空域巡回设置 ═══ -->
+      <div v-if="planningMode === 'patrol' && patrolMode === 'polygon'" class="panel-section">
+        <h3 class="section-title">🔷 空域巡回设置</h3>
+        <p class="mode-desc">在地图上绘制多边形空域，系统根据空域生成巡逻路线，自动跟随地形起伏</p>
+        <el-button
+          @click="startPolygonDrawing"
+          :type="isDrawingPolygon ? 'warning' : 'primary'"
+          style="width:100%;margin-bottom:8px"
+        >
+          {{ isDrawingPolygon ? '取消绘制' : '开始绘制空域' }}
+        </el-button>
+        <p v-if="isDrawingPolygon" class="drawing-hint">
+          🖱️ 左键点击添加顶点 · 点击首点/右键/Enter 闭合 · Esc 取消
+        </p>
+        <div v-if="polygonCoords" class="drawing-status">
+          <span>✅ 已绘制 <strong>{{ polygonCoords.length }}</strong> 个顶点的空域</span>
+          <el-button size="small" text type="danger" @click="clearPolygon">清除重绘</el-button>
+        </div>
+
+        <!-- 巡逻模式 + 参数 -->
+        <div v-if="polygonCoords" style="margin-top:12px">
+          <div class="param-item">
+            <span>巡逻模式</span>
+            <el-radio-group v-model="patrolPattern" size="small">
+              <el-radio value="boundary">边界巡逻</el-radio>
+              <el-radio value="lawnmower">犁地式覆盖</el-radio>
+            </el-radio-group>
+          </div>
+
+          <template v-if="patrolPattern === 'lawnmower'">
+            <div class="param-item">
+              <span>条带间距 (m)</span>
+              <el-slider v-model="stripSpacing" :min="30" :max="500" :step="10" show-input input-size="small" />
+            </div>
+            <div class="param-item">
+              <span>巡逻方向 (°)</span>
+              <el-slider v-model="patrolAngle" :min="0" :max="180" :step="15" show-input input-size="small" />
+            </div>
+          </template>
+
+          <el-button type="success" size="small" @click="doGeneratePatrolRoute" style="width:100%;margin-top:6px">
+            🔄 生成巡逻路线
+          </el-button>
+
+          <div v-if="generatedWaypoints" class="drawing-status" style="margin-top:8px">
+            <span>✅ 已生成 <strong>{{ generatedWaypoints.length }}</strong> 个巡逻航路点</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ 参数设置 ═══ -->
       <div class="panel-section">
         <h3 class="section-title">⚙️ 参数设置</h3>
+
+        <!-- 巡逻模式：离地飞行高度 -->
+        <div v-if="planningMode === 'patrol'" class="param-item">
+          <span>离地飞行高度</span>
+          <div class="slider-row">
+            <el-slider v-model="terrainAgl" :min="30" :max="200" :step="10" show-input input-size="small" />
+            <span class="unit">m</span>
+          </div>
+        </div>
+
         <div class="param-item">
           <span>无人机速度</span>
           <el-slider v-model="droneSpeed" :min="5" :max="30" :step="1" show-input input-size="small" />
         </div>
+
         <div class="param-item"><el-checkbox v-model="avoidNoFly">避开禁飞区</el-checkbox></div>
         <div class="param-item"><el-checkbox v-model="avoidHeightLimit">避开限高区</el-checkbox></div>
-        <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
-        <div v-if="avoidBuildings" class="param-item param-item--indent">
-          <div class="param-label-row">
-            <span>强制飞行限高</span>
-            <span class="param-hint">低于限高的建筑从上方飞越；高于限高的建筑群强制水平绕行（不会超过此高度）</span>
+
+        <!-- 选点规划专属：建筑物避让 -->
+        <template v-if="planningMode === 'points'">
+          <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
+          <div v-if="avoidBuildings" class="param-item param-item--indent">
+            <div class="param-label-row">
+              <span>强制飞行限高</span>
+              <span class="param-hint">低于限高的建筑从上方飞越；高于限高的建筑群强制水平绕行（不会超过此高度）</span>
+            </div>
+            <div class="slider-row">
+              <el-slider v-model="suggestedAlt" :min="50" :max="250" :step="10" show-input input-size="small" />
+              <span class="unit">m</span>
+            </div>
           </div>
-          <div class="slider-row">
-            <el-slider v-model="suggestedAlt" :min="50" :max="250" :step="10" show-input input-size="small" />
-            <span class="unit">m</span>
-          </div>
-        </div>
+        </template>
+
         <div class="param-item"><el-checkbox v-model="considerWeather">考虑天气</el-checkbox></div>
       </div>
 
-      <el-button type="primary" size="large" @click="doPlan" :loading="planning" :disabled="!startPoint || !endPoint" style="width:100%">
+      <el-button type="primary" size="large" @click="doPlan" :loading="planning" :disabled="!canPlan" style="width:100%">
         🚁 开始路径规划
       </el-button>
 
@@ -156,15 +260,72 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, nextTick } from 'vue'
+import { ref, reactive, watch, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
 import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
 import { useMapStore } from '@/stores/map'
+import { generateBoundaryPatrol, generateLawnmowerPatrol } from '@/utils/patrolRouteGenerator'
 
 const mapStore = useMapStore()
 const mapContainerRef = ref(null)
+
+// ── 规划模式（顶层） ──────────────────────────
+const planningMode = ref('points')  // 'points' | 'patrol'
+// ── 巡逻子模式 ────────────────────────────────
+const patrolMode = ref('line')      // 'line' | 'polygon'
+
+// ── 选点规划状态 ──────────────────────────────
+const startInput = ref('')
+const endInput = ref('')
+const startPoint = ref(null)
+const endPoint = ref(null)
+const waypoints = ref([])
+
+// ── 沿线飞行状态 ──────────────────────────────
+const isDrawingLine = ref(false)
+const linePath = ref(null)
+
+// ── 空域巡回状态 ──────────────────────────────
+const isDrawingPolygon = ref(false)
+const polygonCoords = ref(null)
+const patrolPattern = ref('boundary')
+const stripSpacing = ref(100)
+const patrolAngle = ref(0)
+const generatedWaypoints = ref(null)
+
+// ── 参数 ──────────────────────────────────────
+const droneSpeed = ref(15)
+const terrainAgl = ref(80)        // 巡逻模式离地飞行高度
+const suggestedAlt = ref(120)     // 选点模式强制飞行限高
+const avoidNoFly = ref(true)
+const avoidHeightLimit = ref(true)
+const avoidBuildings = ref(true)
+const considerWeather = ref(true)
+
+// ── 选点交互 ──────────────────────────────────
+const pickingPoint = ref(null)
+const planning = ref(false)
+const planResult = ref(null)
+const planProgress = ref(null)
+const planProgressLabel = ref('')
+
+// 自定义标记
+let startMarker = null
+let endMarker = null
+let waypointMarkers = []
+let lastPlanPath = null
+let lastAltProfile = null
+
+// ── 飞行阶段颜色映射 ──────────────────────────
+const PHASE_LEGEND = {
+  ascent:     { color: '#22c55e', label: '起飞爬升段' },
+  cruise:     { color: '#3b82f6', label: '巡航段' },
+  descent:    { color: '#f59e0b', label: '降落下降段' },
+  building:   { color: '#a855f7', label: '建筑物避让段' },
+  height_limit: { color: '#ef4444', label: '限高区绕行段' },
+}
 
 // ── 保存航线弹窗 ──────────────────────────────
 const saveDialogVisible = ref(false)
@@ -172,8 +333,14 @@ const saveForm = reactive({ name: '', enterprise: '', person: '', notes: '' })
 
 function openSaveDialog() {
   if (!planResult.value?.is_feasible) return
-  const start = startPoint.value
-  saveForm.name = start ? `${start.lng.toFixed(3)},${start.lat.toFixed(3)} → 规划航线` : '新规划航线'
+  if (planningMode.value === 'points') {
+    const start = startPoint.value
+    saveForm.name = start ? `${start.lng.toFixed(3)},${start.lat.toFixed(3)} → 规划航线` : '新规划航线'
+  } else if (patrolMode.value === 'line') {
+    saveForm.name = '沿线飞行巡视航线'
+  } else {
+    saveForm.name = patrolPattern.value === 'boundary' ? '边界巡逻航线' : '犁地式覆盖巡逻航线'
+  }
   saveForm.enterprise = ''
   saveForm.person = ''
   saveForm.notes = ''
@@ -196,10 +363,7 @@ function confirmSaveRoute() {
     total_distance: r.total_distance,
     estimated_time: r.estimated_time,
     waypoints: r.path || [],
-    route_line: {
-      type: 'LineString',
-      coordinates: (r.path || []).map(p => [p.lng, p.lat]),
-    },
+    route_line: { type: 'LineString', coordinates: (r.path || []).map(p => [p.lng, p.lat]) },
     altitude_profile: r.altitude_profile || [],
     created_at: new Date().toISOString(),
   }
@@ -208,49 +372,28 @@ function confirmSaveRoute() {
   ElMessage.success('航线已保存至态势大屏航线列表')
 }
 
-const startInput = ref('')
-const endInput = ref('')
-const startPoint = ref(null)
-const endPoint = ref(null)
-const waypoints = ref([])
+// ── 是否可以规划 ──────────────────────────────
+const canPlan = computed(() => {
+  if (planningMode.value === 'points') return startPoint.value && endPoint.value
+  if (planningMode.value === 'patrol' && patrolMode.value === 'line') return linePath.value && linePath.value.length >= 2
+  if (planningMode.value === 'patrol' && patrolMode.value === 'polygon') return generatedWaypoints.value && generatedWaypoints.value.length >= 2
+  return false
+})
 
-const droneSpeed = ref(15)
-const suggestedAlt = ref(120)
-const avoidNoFly = ref(true)
-const avoidHeightLimit = ref(true)
-const avoidBuildings = ref(true)
-const considerWeather = ref(true)
-
-const pickingPoint = ref(null)
-const planning = ref(false)
-const planResult = ref(null)
-const planProgress = ref(null)      // 3D 真实建筑绕行计算进度（0-100 / null=隐藏）
-const planProgressLabel = ref('')
-
-// 自定义标记
-let startMarker = null
-let endMarker = null
-let waypointMarkers = []
-let pathLines = []
-let lastPlanPath = null
-let lastAltProfile = null
-
-// 飞行阶段颜色映射
-const PHASE_COLORS = {
-  ascent: '#22c55e',
-  cruise: '#3b82f6',
-  descent: '#f59e0b',
-  height_limit: '#ef4444',
-  building: '#a855f7',
-}
-
-const PHASE_LEGEND = {
-  ascent:     { color: '#22c55e', label: '起飞爬升段' },
-  cruise:     { color: '#3b82f6', label: '巡航段' },
-  descent:    { color: '#f59e0b', label: '降落下降段' },
-  building:   { color: '#a855f7', label: '建筑物避让段' },
-  height_limit: { color: '#ef4444', label: '限高区绕行段' },
-}
+// ── 模式或子模式切换时清理 ───────────────────
+watch([planningMode, patrolMode], () => {
+  const mapRef = mapContainerRef.value
+  mapRef?.stopDrawing()
+  mapRef?.clearDrawing()
+  mapRef?.removeClickHandler()
+  pickingPoint.value = null
+  isDrawingLine.value = false
+  isDrawingPolygon.value = false
+  clearOldPath()
+  mapRef?.clearPlanPath()
+  planResult.value = null
+  planProgress.value = null
+})
 
 // ── 2D/3D 切换时重绘规划路径 ──────────────────
 watch(() => mapContainerRef.value?.viewMode, () => {
@@ -270,7 +413,6 @@ async function onMapClick(pos) {
   if (!pickingPoint.value) return
   const mapRef = mapContainerRef.value
 
-  // 检查点击位置是否在禁飞区/限高区内
   try {
     const check = await checkPoint(pos.lng, pos.lat)
     if (check.in_no_fly_zone) {
@@ -324,38 +466,119 @@ function parseCoords(input) {
   return parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) ? { lng: parts[0], lat: parts[1] } : null
 }
 
-function geocodeStart() {
-  const c = parseCoords(startInput.value)
-  if (c) startPoint.value = c
-}
-function geocodeEnd() {
-  const c = parseCoords(endInput.value)
-  if (c) endPoint.value = c
-}
-
+function geocodeStart() { const c = parseCoords(startInput.value); if (c) startPoint.value = c }
+function geocodeEnd() { const c = parseCoords(endInput.value); if (c) endPoint.value = c }
 function addWaypoint() { waypoints.value.push({ input: '' }) }
 function removeWaypoint(i) { waypoints.value.splice(i, 1) }
 
+// ── 沿线飞行绘制 ──────────────────────────────
+function startLineDrawing() {
+  const mapRef = mapContainerRef.value
+  if (!mapRef) return
+  if (isDrawingLine.value) {
+    mapRef.stopDrawing()
+    isDrawingLine.value = false
+    ElMessage.info('已取消绘制')
+    return
+  }
+  linePath.value = null
+  isDrawingLine.value = true
+  mapRef.clearDrawing()
+  mapRef.startDrawLine((path) => {
+    linePath.value = path
+    isDrawingLine.value = false
+    ElMessage.success(`已绘制飞行线，共 ${path.length} 个航路点`)
+  })
+}
+
+function clearLine() {
+  mapContainerRef.value?.clearDrawing()
+  linePath.value = null
+  isDrawingLine.value = false
+}
+
+// ── 空域巡回绘制 ──────────────────────────────
+function startPolygonDrawing() {
+  const mapRef = mapContainerRef.value
+  if (!mapRef) return
+  if (isDrawingPolygon.value) {
+    mapRef.stopDrawing()
+    isDrawingPolygon.value = false
+    ElMessage.info('已取消绘制')
+    return
+  }
+  polygonCoords.value = null
+  generatedWaypoints.value = null
+  isDrawingPolygon.value = true
+  mapRef.clearDrawing()
+  mapRef.startDrawPolygon((path) => {
+    polygonCoords.value = path
+    isDrawingPolygon.value = false
+    ElMessage.success(`已绘制空域，共 ${path.length} 个顶点`)
+  })
+}
+
+function clearPolygon() {
+  mapContainerRef.value?.clearDrawing()
+  polygonCoords.value = null
+  generatedWaypoints.value = null
+  isDrawingPolygon.value = false
+}
+
+function doGeneratePatrolRoute() {
+  if (!polygonCoords.value) return
+  try {
+    if (patrolPattern.value === 'boundary') {
+      generatedWaypoints.value = generateBoundaryPatrol(polygonCoords.value)
+    } else {
+      generatedWaypoints.value = generateLawnmowerPatrol(polygonCoords.value, {
+        stripSpacing: stripSpacing.value,
+        angle: patrolAngle.value,
+      })
+    }
+    ElMessage.success(`已生成 ${generatedWaypoints.value.length} 个巡逻航路点`)
+  } catch (e) {
+    ElMessage.error('巡逻路线生成失败: ' + (e.message || '未知错误'))
+  }
+}
+
 // ── 路径规划 ──────────────────────────────────
 async function doPlan() {
-  if (!startPoint.value || !endPoint.value) { ElMessage.warning('请先设置起点和终点'); return }
+  let start, end, waypointsList
+
+  if (planningMode.value === 'points') {
+    if (!startPoint.value || !endPoint.value) { ElMessage.warning('请先设置起点和终点'); return }
+    start = { ...startPoint.value, alt: 100 }
+    end = { ...endPoint.value, alt: 100 }
+    waypointsList = waypoints.value.map(wp => parseCoords(wp.input)).filter(Boolean).map(c => ({ ...c, alt: 100 }))
+  } else if (patrolMode.value === 'line') {
+    if (!linePath.value || linePath.value.length < 2) { ElMessage.warning('请先绘制飞行线（至少2个点）'); return }
+    const pts = linePath.value
+    start = { lng: pts[0].lng, lat: pts[0].lat, alt: terrainAgl.value }
+    end = { lng: pts[pts.length - 1].lng, lat: pts[pts.length - 1].lat, alt: terrainAgl.value }
+    waypointsList = pts.slice(1, -1).map(p => ({ lng: p.lng, lat: p.lat, alt: terrainAgl.value }))
+  } else {
+    if (!generatedWaypoints.value || generatedWaypoints.value.length < 2) { ElMessage.warning('请先绘制空域并生成巡逻路线'); return }
+    const pts = generatedWaypoints.value
+    start = { lng: pts[0].lng, lat: pts[0].lat, alt: terrainAgl.value }
+    end = { lng: pts[pts.length - 1].lng, lat: pts[pts.length - 1].lat, alt: terrainAgl.value }
+    waypointsList = pts.slice(1, -1).map(p => ({ lng: p.lng, lat: p.lat, alt: terrainAgl.value }))
+  }
+
   planning.value = true
   planProgress.value = 3
   planProgressLabel.value = '正在请求规划数据...'
   try {
-    const wpCoords = waypoints.value.map(wp => parseCoords(wp.input)).filter(Boolean)
     const result = await planPath({
-      start: { ...startPoint.value, alt: 100 },
-      end: { ...endPoint.value, alt: 100 },
-      waypoints: wpCoords.map(c => ({ ...c, alt: 100 })),
+      start, end,
+      waypoints: waypointsList,
       drone_speed: droneSpeed.value,
-      suggested_alt: suggestedAlt.value,
+      suggested_alt: planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
-      avoid_buildings: avoidBuildings.value,
+      avoid_buildings: planningMode.value === 'points' ? avoidBuildings.value : false,
       consider_weather: considerWeather.value,
     })
-    // 起点/途经点/终点落在禁飞区内 → 拒绝规划并弹窗提示
     if (result.blocked_in_no_fly) {
       planResult.value = null
       planProgress.value = null
@@ -383,44 +606,60 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   const mapRef = mapContainerRef.value
   if (!mapRef || !pathPoints?.length) return
 
-  // 保存数据以便模式切换后重绘
   lastPlanPath = pathPoints
   lastAltProfile = altitudeProfile
 
   clearOldPath()
   mapRef.clearPlanPath()
 
-  // 等待地图引擎准备好
   await new Promise(r => setTimeout(r, 300))
 
-  // 添加起点标记
-  startMarker = mapRef.addMarker(pathPoints[0].lng, pathPoints[0].lat, '#16a34a')
-  // 添加终点标记
-  const end = pathPoints[pathPoints.length - 1]
-  endMarker = mapRef.addMarker(end.lng, end.lat, '#dc2626')
-  // 添加途经点标记
-  const activeWaypoints = waypoints.value
-    .map(wp => parseCoords(wp.input))
-    .filter(Boolean)
-  for (const wp of activeWaypoints) {
-    const m = mapRef.addMarker(wp.lng, wp.lat, '#2563eb')
-    if (m) waypointMarkers.push(m)
+  let adjustedPath = pathPoints
+  let adjustedProfile = altitudeProfile
+
+  let controlPts
+  if (planningMode.value === 'points') {
+    const activeWaypoints = waypoints.value.map(wp => parseCoords(wp.input)).filter(Boolean)
+    controlPts = [
+      { lng: startPoint.value.lng, lat: startPoint.value.lat },
+      ...activeWaypoints.map(w => ({ lng: w.lng, lat: w.lat })),
+      { lng: endPoint.value.lng, lat: endPoint.value.lat },
+    ]
+  } else if (patrolMode.value === 'line') {
+    controlPts = (linePath.value || []).map(p => ({ lng: p.lng, lat: p.lat }))
+  } else {
+    controlPts = (generatedWaypoints.value || []).map(p => ({ lng: p.lng, lat: p.lat }))
   }
 
-  // 控制点（起点/途经点/终点）——供 3D 客户端基于真实建筑的贴地绕行规划
-  const controlPts = [
-    { lng: startPoint.value.lng, lat: startPoint.value.lat },
-    ...activeWaypoints.map(w => ({ lng: w.lng, lat: w.lat })),
-    { lng: end.lng, lat: end.lat },
-  ]
+  // 起终点标记
+  startMarker = mapRef.addMarker(adjustedPath[0].lng, adjustedPath[0].lat, '#16a34a')
+  const endPt = adjustedPath[adjustedPath.length - 1]
+  endMarker = mapRef.addMarker(endPt.lng, endPt.lat, '#dc2626')
 
-  // 绘制路径线（传入巡航高度/避障开关/控制点/进度回调，供 3D 真实建筑绕行规划使用）
-  if (mapRef.viewMode === '3D') {
+  // 途经点标记
+  if (planningMode.value === 'points') {
+    const activeWaypoints = waypoints.value.map(wp => parseCoords(wp.input)).filter(Boolean)
+    for (const wp of activeWaypoints) {
+      const m = mapRef.addMarker(wp.lng, wp.lat, '#2563eb')
+      if (m) waypointMarkers.push(m)
+    }
+  } else if (controlPts.length > 2) {
+    const step = patrolMode.value === 'polygon' ? Math.max(1, Math.floor(controlPts.length / 20)) : 1
+    for (let i = 1; i < controlPts.length - 1; i += step) {
+      const m = mapRef.addMarker(controlPts[i].lng, controlPts[i].lat, '#2563eb')
+      if (m) waypointMarkers.push(m)
+    }
+  }
+
+  const cruiseAlt = planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value
+  const useBuildings = planningMode.value === 'points' ? avoidBuildings.value : false
+
+  if (mapRef.viewMode === '3D' && planningMode.value === 'points') {
     planProgress.value = 18
     planProgressLabel.value = '计算真实建筑绕行航线'
-    mapRef.drawPlanPath(pathPoints, altitudeProfile, {
-      cruiseAlt: suggestedAlt.value,
-      avoidBuildings: avoidBuildings.value,
+    mapRef.drawPlanPath(adjustedPath, adjustedProfile, {
+      cruiseAlt,
+      avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
       onProgress: (frac, label) => {
@@ -429,10 +668,18 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
         if (frac >= 1) setTimeout(() => { planProgress.value = null }, 800)
       },
     })
+  } else if (mapRef.viewMode === '3D') {
+    mapRef.drawPlanPath(adjustedPath, adjustedProfile, {
+      cruiseAlt,
+      avoidBuildings: useBuildings,
+      avoidNoFly: avoidNoFly.value,
+      controlPts,
+    })
+    planProgress.value = null
   } else {
-    mapRef.drawPlanPath(pathPoints, altitudeProfile, {
-      cruiseAlt: suggestedAlt.value,
-      avoidBuildings: avoidBuildings.value,
+    mapRef.drawPlanPath(adjustedPath, adjustedProfile, {
+      cruiseAlt,
+      avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
     })
@@ -468,6 +715,34 @@ function formatTime(s) {
   width: 360px; padding: 16px; overflow-y: auto;
   background: #f8f9fa; border-right: 1px solid #e5e7eb;
   display: flex; flex-direction: column; gap: 16px;
+}
+
+.mode-selector {
+  display: flex; justify-content: center;
+  padding: 4px; background: #f1f5f9; border-radius: 10px;
+}
+.mode-selector .el-radio-group { width: 100%; display: flex; }
+.mode-selector :deep(.el-radio-button) { flex: 1; }
+.mode-selector :deep(.el-radio-button__inner) {
+  width: 100%; font-size: 12px; padding: 6px 4px;
+}
+.sub-selector {
+  margin-top: -8px;
+  padding: 3px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+}
+
+.mode-desc {
+  font-size: 12px; color: #6b7280; margin-bottom: 8px; line-height: 1.4;
+}
+.drawing-hint {
+  font-size: 12px; color: #2563eb; margin: 6px 0; padding: 6px 10px;
+  background: #eff6ff; border-radius: 6px; border: 1px solid #bfdbfe;
+}
+.drawing-status {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px; color: #374151; margin-top: 8px;
+  padding: 6px 10px; background: #f0fdf4; border-radius: 6px;
+  border: 1px solid #bbf7d0;
 }
 
 .panel-section {
@@ -518,5 +793,4 @@ function formatTime(s) {
 .legend-dot { width: 28px; height: 5px; border-radius: 3px; flex-shrink: 0; }
 
 .map-area { flex: 1; position: relative; }
-
 </style>

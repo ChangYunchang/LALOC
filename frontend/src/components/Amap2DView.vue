@@ -658,6 +658,238 @@ function clearCustomMarkers(markerList) {
   markerList.forEach(m => m?.setMap(null))
 }
 
+// ── 绘图工具（纯 Canvas 绘制，零 DOM 标记，杜绝点击拦截）─────
+//
+// 核心设计：所有顶点标记使用 Polyline + lineCap:'round' + 极小偏移在
+// AMap 内部 Canvas 上渲染成圆点，不创建任何 Marker DOM 节点。Polyline /
+// Polygon 预览和结果全部设置 clickable:false。因此无论如何点击，地图
+// click 事件都能正确触发，多边形顶点数量无上限。
+//
+let isDrawing = false
+let drawMode = null              // 'line' | 'polygon'
+let drawVertices = []            // [{lng, lat}]
+let drawDotLines = []            // 顶点圆点 Polyline 列表
+let drawPreview = null           // AMap.Polyline 预览线
+let drawResultOverlay = null     // 完成后保留的覆盖物
+let drawResultFill = null        // 多边形填充
+let drawFinishCallback = null
+let _drawKeyHandler = null
+const DRAW_CLOSE_PX = 30         // 多边形闭合阈值（像素）
+const DOT_COLOR_LINE = '#3b82f6'
+const DOT_COLOR_POLY = '#8b5cf6'
+
+function _drawClearAll() {
+  // 清除顶点圆点（Polyline）
+  drawDotLines.forEach(l => l.setMap(null))
+  drawDotLines = []
+  drawVertices = []
+  // 清除预览线
+  if (drawPreview) { drawPreview.setMap(null); drawPreview = null }
+  // 移除事件
+  const map = mapStore.map
+  if (map) {
+    map.off('click', _onDrawClick)
+    map.off('mousemove', _onDrawMouseMove)
+    map.off('rightclick', _onDrawRightClick)
+  }
+  if (_drawKeyHandler) {
+    document.removeEventListener('keydown', _drawKeyHandler)
+    _drawKeyHandler = null
+  }
+  isDrawing = false
+  drawMode = null
+  drawFinishCallback = null
+}
+
+// 用 Polyline + lineCap:'round' 在 Canvas 上绘制可见圆点（≈10px），
+// 完全不使用 DOM Marker，因此绝不会拦截地图 click 事件。
+function _drawVertexDots() {
+  // 先清除旧圆点
+  drawDotLines.forEach(l => l.setMap(null))
+  drawDotLines = []
+
+  const color = drawMode === 'line' ? DOT_COLOR_LINE : DOT_COLOR_POLY
+  const map = mapStore.map
+  if (!map) return
+
+  // 每个顶点：一条极短线段（0.000002° ≈ 0.2m），
+  // lineCap:'round' + strokeWeight:10 → 渲染为 10px 实心圆
+  for (const v of drawVertices) {
+    const dotLine = new AMap.Polyline({
+      path: [
+        [v.lng, v.lat],
+        [v.lng + 0.000002, v.lat],   // 极小偏移，肉眼不可见
+      ],
+      strokeColor: color,
+      strokeWeight: 10,
+      strokeOpacity: 0.95,
+      lineCap: 'round',
+      lineJoin: 'round',
+      clickable: false,
+      zIndex: 130,
+    })
+    map.add(dotLine)
+    drawDotLines.push(dotLine)
+  }
+}
+
+function _drawConfirm() {
+  if (drawMode === 'line' && drawVertices.length < 2) return
+  if (drawMode === 'polygon' && drawVertices.length < 3) return
+
+  const path = drawVertices.map(v => ({ lng: v.lng, lat: v.lat }))
+
+  // 清除预览和圆点，保留结果
+  if (drawPreview) { drawPreview.setMap(null); drawPreview = null }
+  drawDotLines.forEach(l => l.setMap(null))
+  drawDotLines = []
+  if (drawResultOverlay) { drawResultOverlay.setMap(null); drawResultOverlay = null }
+  if (drawResultFill) { drawResultFill.setMap(null); drawResultFill = null }
+
+  // 绘制最终结果边框
+  const points = drawVertices.map(v => new AMap.LngLat(v.lng, v.lat))
+  const displayPositions = drawMode === 'polygon' ? [...points, points[0]] : points
+  drawResultOverlay = new AMap.Polyline({
+    path: displayPositions,
+    strokeColor: drawMode === 'line' ? '#3b82f6' : '#8b5cf6',
+    strokeWeight: 4,
+    strokeOpacity: 0.9,
+    strokeStyle: 'solid',
+    clickable: false,
+    zIndex: 100,
+  })
+  mapStore.map.add(drawResultOverlay)
+
+  // 多边形半透明填充
+  if (drawMode === 'polygon') {
+    drawResultFill = new AMap.Polygon({
+      path: points,
+      strokeColor: '#8b5cf6',
+      strokeWeight: 2,
+      strokeOpacity: 0.6,
+      fillColor: '#c4b5fd',
+      fillOpacity: 0.25,
+      clickable: false,
+      zIndex: 99,
+    })
+    drawResultFill._isDrawResult = true
+    mapStore.map.add(drawResultFill)
+  }
+
+  const cb = drawFinishCallback
+  _drawClearAll()
+  if (cb) cb(path)
+}
+
+function _onDrawClick(e) {
+  const pos = { lng: e.lnglat.getLng(), lat: e.lnglat.getLat() }
+  const map = mapStore.map
+
+  // 多边形模式：检查是否点击在首点附近（闭合判断）
+  if (drawMode === 'polygon' && drawVertices.length >= 3) {
+    const first = drawVertices[0]
+    const p1 = map.lngLatToContainer(new AMap.LngLat(first.lng, first.lat))
+    const p2 = map.lngLatToContainer(new AMap.LngLat(pos.lng, pos.lat))
+    const dist = Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2))
+    if (dist < DRAW_CLOSE_PX) {
+      _drawConfirm()
+      return
+    }
+  }
+
+  // 添加顶点（仅存储坐标，用 Polyline 渲染圆点）
+  drawVertices.push({ lng: pos.lng, lat: pos.lat })
+
+  // 重绘预览线 + 顶点圆点（全部 Canvas 渲染，零 DOM）
+  _drawRedrawPreview()
+  _drawVertexDots()
+}
+
+function _drawRedrawPreview() {
+  if (drawPreview) { drawPreview.setMap(null); drawPreview = null }
+  if (drawVertices.length < 2) return
+
+  const points = drawVertices.map(v => new AMap.LngLat(v.lng, v.lat))
+  // 预览始终使用开放链（不闭合），避免闭合 Polyline 拦截后续点击事件
+  // 闭合仅在用户确认（右键/Enter/点击首点）时由 _drawConfirm 处理
+  const positions = points
+
+  drawPreview = new AMap.Polyline({
+    path: positions,
+    strokeColor: drawMode === 'line' ? '#3b82f6' : '#8b5cf6',
+    strokeWeight: 2,
+    strokeOpacity: 0.6,
+    strokeStyle: 'dashed',
+    strokeDasharray: [8, 4],
+    zIndex: 120,
+    clickable: false,
+  })
+  mapStore.map.add(drawPreview)
+}
+
+function _onDrawMouseMove(e) {
+  // 鼠标移动预览：仅做微小性能优化，不需要额外的动态线
+  // （静态顶点连线已足够直观）
+}
+
+function _onDrawRightClick(e) {
+  e.preventDefault?.()
+  if (drawMode === 'line' && drawVertices.length >= 2) _drawConfirm()
+  if (drawMode === 'polygon' && drawVertices.length >= 3) _drawConfirm()
+}
+
+function startDrawLine(onFinish) {
+  const map = mapStore.map
+  if (!map) return
+  _drawClearAll()
+  isDrawing = true
+  drawMode = 'line'
+  drawFinishCallback = onFinish
+
+  map.on('click', _onDrawClick)
+  map.on('rightclick', _onDrawRightClick)
+
+  _drawKeyHandler = (e) => {
+    if (e.key === 'Enter' && drawVertices.length >= 2) { e.preventDefault(); _drawConfirm() }
+    if (e.key === 'Escape') { e.preventDefault(); _drawClearAll() }
+  }
+  document.addEventListener('keydown', _drawKeyHandler)
+}
+
+function startDrawPolygon(onFinish) {
+  const map = mapStore.map
+  if (!map) return
+  _drawClearAll()
+  isDrawing = true
+  drawMode = 'polygon'
+  drawFinishCallback = onFinish
+
+  map.on('click', _onDrawClick)
+  map.on('rightclick', _onDrawRightClick)
+
+  _drawKeyHandler = (e) => {
+    if (e.key === 'Enter' && drawVertices.length >= 3) { e.preventDefault(); _drawConfirm() }
+    if (e.key === 'Escape') { e.preventDefault(); _drawClearAll() }
+  }
+  document.addEventListener('keydown', _drawKeyHandler)
+}
+
+function stopDrawing() {
+  _drawClearAll()
+}
+
+function clearDrawing() {
+  if (drawResultOverlay) { drawResultOverlay.setMap(null); drawResultOverlay = null }
+  if (drawResultFill) { drawResultFill.setMap(null); drawResultFill = null }
+  // 也清除绘制的填充多边形
+  const map = mapStore.map
+  if (map) {
+    map.getAllOverlays?.().forEach(o => {
+      if (o._isDrawResult) { o.setMap(null) }
+    })
+  }
+}
+
 defineExpose({
   drawRoutes,
   highlightRoute,
@@ -673,6 +905,10 @@ defineExpose({
   clearCustomMarkers,
   drawPlanPath,
   clearPlanPath,
+  startDrawLine,
+  startDrawPolygon,
+  stopDrawing,
+  clearDrawing,
 })
 </script>
 
