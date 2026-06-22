@@ -127,20 +127,20 @@ async function createViewer() {
 
   viewer.cesiumWidget.creditContainer.style.display = 'none'
 
-  // 优先使用高德卫星图（国内访问快），失败回退 OSM
+  // 使用 ESRI 卫星影像（WGS-84 对齐），与 OSM 白模坐标系一致，无偏移
+  // 注意：高德/百度卫星瓦片使用 GCJ-02，直接用于 Cesium 会导致白模与底图错位 ~300-500m
   try {
-    const amapImagery = new Cesium.UrlTemplateImageryProvider({
-      url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-      subdomains: ['1', '2', '3', '4'],
-      maximumLevel: 18,
+    const esriImagery = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      maximumLevel: 19,
     })
-    viewer.imageryLayers.addImageryProvider(amapImagery)
-    console.log('AMap satellite layer added')
+    viewer.imageryLayers.addImageryProvider(esriImagery)
+    console.log('ESRI World Imagery layer added (WGS-84 aligned)')
   } catch (e) {
-    console.warn('AMap layer failed, trying OSM:', e.message)
+    console.warn('ESRI layer failed, trying OSM:', e.message)
     try {
       viewer.imageryLayers.addImageryProvider(
-        Cesium.createOpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+        new Cesium.UrlTemplateImageryProvider({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maximumLevel: 19 })
       )
     } catch (e2) {
       console.warn('OSM layer also failed:', e2.message)
@@ -812,13 +812,13 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     minLng = Math.min(minLng, p.lng); maxLng = Math.max(maxLng, p.lng)
     minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat)
   }
-  const CORRIDOR = 360  // 走廊半宽（米）：绕行可用空间，超出走廊视作开阔（不采样）
+  const CORRIDOR = 250  // 走廊半宽（米）：绕行可用空间，超出走廊视作开阔（不采样）
   minLng -= CORRIDOR / _mLngRef; maxLng += CORRIDOR / _mLngRef
   minLat -= CORRIDOR / _MPD; maxLat += CORRIDOR / _MPD
 
-  // 固定 10m 栅格并对齐到全局整数格（缓存键依赖全局格号）；过大则按 2 的幂放粗
-  let CELL = 10, cellLat, cellLng, C0, R0, cols, rows, total
-  const MAX_CELLS = 60000
+  // 起始 15m 栅格；过大则按 2 的幂放粗；上限 20,000 格保证主线程不阻塞
+  let CELL = 15, cellLat, cellLng, C0, R0, cols, rows, total
+  const MAX_CELLS = 20000
   while (true) {
     cellLat = CELL / _MPD; cellLng = CELL / _mLngRef
     C0 = Math.floor(minLng / cellLng); R0 = Math.floor(minLat / cellLat)
@@ -855,37 +855,49 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   const buildH = new Float32Array(total)         // 建筑离地高度（走廊外＝0，视作开阔）
   const inCorridor = new Uint8Array(total)
   const needCells = []                            // 需新采样的格 {r,c,i}
-  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-    const i = r * cols + c
-    const cc = cellCenter(r, c)
-    if (distToSegsM(cc.lng, cc.lat) > CORRIDOR) continue
-    inCorridor[i] = 1
-    const cached = _bhCache.get(ckey(r, c))
-    if (cached !== undefined) { buildH[i] = cached; continue }
-    needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
+  for (let r = 0; r < rows; r++) {
+    if (r % 40 === 0 && r > 0) { await yld(); if (!live()) return null }  // 防格点扫描阻塞主线程
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c
+      const cc = cellCenter(r, c)
+      if (distToSegsM(cc.lng, cc.lat) > CORRIDOR) continue
+      inCorridor[i] = 1
+      const cached = _bhCache.get(ckey(r, c))
+      if (cached !== undefined) { buildH[i] = cached; continue }
+      needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
+    }
   }
 
   if (onProgress) onProgress(0.03, needCells.length ? `采样真实建筑（${needCells.length} 点）` : '复用缓存')
   if (needCells.length) {
     const terrainProv = viewer.terrainProvider
-    // 地形：仅对需采样点做一次性采样（平缓，足够）；与场景采样并行
-    const terrCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
-    const sceneCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
-    const terrainPromise = terrainProv
-      ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
-    const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
-    const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
-    if (!live()) return null
-    if (scene === null) return null   // 采样失败/瓦片未就绪 → 交回退（不写入错误缓存）
-    for (let k = 0; k < needCells.length; k++) {
-      const { i } = needCells[k]
-      const sh = (scene[k] && Number.isFinite(scene[k].height)) ? scene[k].height : 0
-      const th = (terr && terr[k] && Number.isFinite(terr[k].height)) ? terr[k].height : 0
-      const h = Math.max(0, sh - th)
-      buildH[i] = h
-      _bhCache.set(ckey(needCells[k].r, needCells[k].c), h)   // 写入缓存
+    // 分批采样（每批 250 点），每批之间让出主线程并更新进度条，避免单次大批阻塞页面
+    const BATCH = 250
+    let anySceneFailed = false
+    for (let b = 0; b < needCells.length; b += BATCH) {
+      if (!live()) return null
+      const slice = needCells.slice(b, b + BATCH)
+      const terrCarto = slice.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+      const sceneCarto = slice.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+      const terrainPromise = terrainProv
+        ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
+      const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
+      const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
+      if (!live()) return null
+      if (scene === null) { anySceneFailed = true; break }
+      for (let k = 0; k < slice.length; k++) {
+        const { i } = slice[k]
+        const sh = (scene[k] && Number.isFinite(scene[k].height)) ? scene[k].height : 0
+        const th = (terr && terr[k] && Number.isFinite(terr[k].height)) ? terr[k].height : 0
+        buildH[i] = Math.max(0, sh - th)
+        _bhCache.set(ckey(slice[k].r, slice[k].c), buildH[i])
+      }
+      const pct = 0.03 + 0.38 * (b + slice.length) / needCells.length
+      if (onProgress) onProgress(pct, `采样建筑高度 ${b + slice.length}/${needCells.length}`)
+      await yld()   // 每批完成后让出主线程，保持 UI 响应
     }
-    if (_bhCache.size > 400000) _bhCache.clear()   // 防无限增长
+    if (anySceneFailed) return null
+    if (_bhCache.size > 400000) _bhCache.clear()
   }
 
   // 关键：无论是否采样（缓存全部命中时没有任何 await），都必须在此处让出主线程。
@@ -894,7 +906,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   if (!live()) return null
 
   // ── 3. 障碍栅格：高于可越顶的真实建筑 + 禁飞区 ───────────────
-  if (onProgress) onProgress(0.44, '规划绕行航线')
+  if (onProgress) onProgress(0.42, '规划绕行航线')
   const blocked = new Uint8Array(total)  // 0 通行 / 1 建筑 / 2 禁飞
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const i = r * cols + c
@@ -930,8 +942,9 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     const sKey = sCell.r * cols + sCell.c
     gS.set(sKey, 0); open.push({ r: sCell.r, c: sCell.c, f: oct(sCell.r, sCell.c) })
     const closed = new Set(); let guard = 0
-    while (open.size && guard++ < total) {
-      if (guard % 500 === 0) { await yld(); if (!live()) return null }
+    const guardLimit = Math.min(total, 60000)
+    while (open.size && guard++ < guardLimit) {
+      if (guard % 200 === 0) { await yld(); if (!live()) return null }
       const cur = open.pop(); const cK = cur.r * cols + cur.c
       if (cK === gKey) { const cells = []; let k = cK; while (k !== undefined) { cells.push({ r: Math.floor(k / cols), c: k % cols }); k = par.get(k) } cells.reverse(); return cells }
       if (closed.has(cK)) continue
@@ -975,7 +988,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   for (let s = 0; s < _segTotal; s++) {
     const seg = await astarSeg(nearestFree(toCell(controlPts[s])), nearestFree(toCell(controlPts[s + 1])))
     if (!live()) return null
-    if (onProgress) onProgress(0.44 + 0.44 * (s + 1) / _segTotal, `绕行规划 ${s + 1}/${_segTotal} 段`)
+    if (onProgress) onProgress(0.42 + 0.46 * (s + 1) / _segTotal, `绕行规划 ${s + 1}/${_segTotal} 段`)
     let segPts
     if (!seg) { feasible = false; segPts = [controlPts[s], controlPts[s + 1]] }
     else {

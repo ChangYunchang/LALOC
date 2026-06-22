@@ -199,8 +199,6 @@ const ALERT_REASONS = [
   { value: 'low_battery', label: '⚡ 电量严重不足' },
   { value: 'device_fault', label: '🔧 设备故障迫降' },
   { value: 'comm_loss',   label: '📡 通信失联备降' },
-  { value: 'weather',     label: '🌩 极端天气绕避' },
-  { value: 'nfz_expand',  label: '🚫 临时禁区扩展' },
 ]
 
 // 充电/维修站 — 均位于示例航线的关键节点附近
@@ -400,12 +398,19 @@ function renderStations() {
     const bg = isSelected ? '#16a34a' : isInRange ? (s.type === 'repair' ? '#7c3aed' : '#f59e0b') : '#94a3b8'
     const icon = s.type === 'repair' ? '🔧' : '⚡'
     const label = s.type === 'repair' ? '维修站' : '充电站'
+    // 选中时显示完整信息（含容量），其余只显示图标+名称，避免标注过宽导致重叠
+    const contentHtml = isSelected
+      ? `<div style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:nowrap;border:2px solid #fff;text-align:center">
+          ${icon} ${s.name}<br><span style="font-size:10px;opacity:.85">${label} · 空位 ${s.available}/${s.capacity}</span>
+        </div>`
+      : `<div style="background:${bg};color:#fff;padding:3px 7px;border-radius:5px;font-size:11px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.2);white-space:nowrap;border:2px solid #fff">
+          ${icon} ${s.name}
+        </div>`
     const m = new AMap.Marker({
       position: [s.lng, s.lat],
-      content: `<div style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:nowrap;border:2px solid #fff;text-align:center">
-        ${icon} ${s.name}<br><span style="font-size:10px;opacity:.85">${label} · 空位 ${s.available}/${s.capacity}</span>
-      </div>`,
-      offset: new AMap.Pixel(-55, -32),
+      content: contentHtml,
+      // 充电/维修站标注锚点在标注正下方（向上偏移），与无人机标注（向下偏移）方向相反，避免重叠
+      offset: new AMap.Pixel(-50, -(isSelected ? 48 : 30)),
       zIndex: isSelected ? 300 : 150,
     })
     map.add(m)
@@ -436,7 +441,8 @@ function renderDroneRoutes() {
       content: `<div class="${cssClass}" style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:${isAlert?700:500};box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;border:2px solid #fff">
         ${icon} ${d.name} 🔋${d.battery}%
       </div>`,
-      offset: new AMap.Pixel(-42, -16),
+      // 无人机标注锚点在标注正上方（向下偏移），充电站标注向上偏移，两类标注方向相反，位置接近时不互遮
+      offset: new AMap.Pixel(-42, 8),
       zIndex: isAlert ? 400 : 100,
     })
     map.add(m)

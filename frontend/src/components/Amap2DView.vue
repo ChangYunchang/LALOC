@@ -485,9 +485,11 @@ onMounted(async () => {
       version: '2.0',
       plugins: ['AMap.Scale', 'AMap.Weather', 'AMap.GeometryUtil'],
     })
-    await zoneStore.fetchAll()
+    // 先创建地图，让用户立即看到界面；禁飞区/限高区数据异步加载，
+    // 加载完成后由下方 watch 触发 renderZones() 自动绘制
     createMap()
     initMiddleButtonDrag(mapRef.value)
+    zoneStore.fetchAll()
   } catch (e) {
     console.error('Amap 2D map load failed:', e)
   }
@@ -890,8 +892,78 @@ function clearDrawing() {
   }
 }
 
+// ── 静态背景航线（PathPlanning 用，无动画/无无人机标记） ──
+let bgRouteLines = []
+
+/**
+ * Chaikin 曲线平滑：对坐标数组执行 2 次 Chaikin 迭代，消除折点尖角。
+ * 输入/输出均为 AMap.LngLat 数组，首尾点保持不变（钉住端点）。
+ */
+function _chaikin(pts, iterations = 2) {
+  let p = pts.map(q => [q.getLng(), q.getLat()])
+  for (let iter = 0; iter < iterations; iter++) {
+    const np = [p[0]]
+    for (let i = 0; i < p.length - 1; i++) {
+      np.push([p[i][0] * 0.75 + p[i + 1][0] * 0.25, p[i][1] * 0.75 + p[i + 1][1] * 0.25])
+      np.push([p[i][0] * 0.25 + p[i + 1][0] * 0.75, p[i][1] * 0.25 + p[i + 1][1] * 0.75])
+    }
+    np.push(p[p.length - 1])
+    p = np
+  }
+  return p.map(([lng, lat]) => new AMap.LngLat(lng, lat))
+}
+
+function drawBackgroundRoutes(routes) {
+  bgRouteLines.forEach(l => l?.setMap(null))
+  bgRouteLines = []
+  const map = mapStore.map
+  if (!map || !AMap || !routes?.length) return
+
+  routes.forEach(route => {
+    if (!route.route_line?.coordinates) return
+    const rawCoords = route.route_line.coordinates
+    const altProfile = route.altitude_profile
+    const hasProfile = altProfile && altProfile.length === rawCoords.length
+
+    if (hasProfile) {
+      // 按相位分段，每段单独做 Chaikin 平滑后绘制
+      const boundaries = [0]
+      for (let i = 1; i < rawCoords.length; i++) {
+        if (altProfile[i].phase !== altProfile[i - 1].phase) boundaries.push(i)
+      }
+      for (let b = 0; b < boundaries.length; b++) {
+        const startIdx = boundaries[b]
+        const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : rawCoords.length - 1
+        const phase = altProfile[startIdx].phase
+        const color = PHASE_COLORS[phase] || COLOR_NORMAL
+        const rawSeg = rawCoords.slice(startIdx, endIdx + 1).map(c => new AMap.LngLat(c[0], c[1]))
+        if (rawSeg.length < 2) continue
+        const smoothSeg = rawSeg.length >= 4 ? _chaikin(rawSeg) : rawSeg
+        const line = new AMap.Polyline({
+          path: smoothSeg, strokeColor: color,
+          strokeWeight: 3, strokeOpacity: 0.55,
+          lineJoin: 'round', lineCap: 'round', zIndex: 90,
+        })
+        map.add(line)
+        bgRouteLines.push(line)
+      }
+    } else {
+      const rawPts = rawCoords.map(c => new AMap.LngLat(c[0], c[1]))
+      const smoothPts = rawPts.length >= 4 ? _chaikin(rawPts) : rawPts
+      const line = new AMap.Polyline({
+        path: smoothPts, strokeColor: COLOR_NORMAL,
+        strokeWeight: 3, strokeOpacity: 0.55,
+        lineJoin: 'round', lineCap: 'round', zIndex: 90,
+      })
+      map.add(line)
+      bgRouteLines.push(line)
+    }
+  })
+}
+
 defineExpose({
   drawRoutes,
+  drawBackgroundRoutes,
   highlightRoute,
   resetRouteHighlight,
   setDronePosition,

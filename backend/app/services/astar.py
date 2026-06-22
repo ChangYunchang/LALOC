@@ -308,13 +308,58 @@ def build_grid_from_db(
     return grid
 
 
+def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
+    """Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞的网格。"""
+    r0, col0 = c1.row, c1.col
+    r1, col1 = c2.row, c2.col
+    dr = abs(r1 - r0)
+    dc = abs(col1 - col0)
+    sr = 1 if r1 > r0 else -1
+    sc = 1 if col1 > col0 else -1
+    err = dr - dc
+    r, c = r0, col0
+    while True:
+        if grid.is_blocked(GridCell(r, c)):
+            return False
+        if r == r1 and c == col1:
+            return True
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r += sr
+        if e2 < dr:
+            err += dr
+            c += sc
+
+
+def _smooth_cells(grid: GridMap, cells: list[GridCell]) -> list[GridCell]:
+    """
+    视线拉直（string pulling）：把 A* 格栅路径中可以直视的中间节点全部删除，
+    消除绕障产生的阶梯型锯齿。
+    """
+    if len(cells) <= 2:
+        return cells
+    result = [cells[0]]
+    i = 0
+    while i < len(cells) - 1:
+        # 从当前节点向终点方向找最远的可直视点
+        j = len(cells) - 1
+        while j > i + 1:
+            if _los_check(grid, result[-1], cells[j]):
+                break
+            j -= 1
+        result.append(cells[j])
+        i = j
+    return result
+
+
 def astar_search(
     grid: GridMap,
     start_lng: float, start_lat: float,
     end_lng: float, end_lat: float,
 ) -> Optional[list[tuple[float, float]]]:
     """
-    A* 搜索算法
+    A* 搜索算法（含视线拉直后处理）
 
     返回: 路径点列表 [(lng, lat), ...]，或 None（不可达）
     """
@@ -350,15 +395,16 @@ def astar_search(
 
         # 到达终点
         if current.cell == end_cell:
-            # 回溯路径
-            path = []
+            # 回溯格栅路径
+            cells: list[GridCell] = []
             node = current
             while node:
-                lng, lat = grid.cell_to_lnglat(node.cell.row, node.cell.col)
-                path.append((lng, lat))
+                cells.append(node.cell)
                 node = node.parent
-            path.reverse()
-            return path
+            cells.reverse()
+            # 视线拉直：去除 A* 阶梯锯齿
+            cells = _smooth_cells(grid, cells)
+            return [grid.cell_to_lnglat(c.row, c.col) for c in cells]
 
         key = (current.cell.row, current.cell.col)
         if key in closed_set:

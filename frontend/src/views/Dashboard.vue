@@ -110,8 +110,14 @@ import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 const zoneStore = useZoneStore()
 const mapStore = useMapStore()
 const apiRoutes = ref([])
-// SAMPLE_ROUTES 作为基础示例航线（含完整高度剖面），API 额外航线追加在后
-const routes = computed(() => [...SAMPLE_ROUTES, ...apiRoutes.value, ...mapStore.savedRoutes])
+// 只保留有完整高度剖面的航线；无 altitude_profile 或长度不匹配的 API/保存路线会退化成绿色，直接过滤掉
+const routes = computed(() => {
+  const all = [...SAMPLE_ROUTES, ...apiRoutes.value, ...mapStore.savedRoutes]
+  return all.filter(r =>
+    r.route_line?.coordinates &&
+    r.altitude_profile?.length === r.route_line.coordinates.length
+  )
+})
 const selectedRoute = ref(null)
 const mapContainerRef = ref(null)
 

@@ -85,6 +85,7 @@ defineExpose({
     _lastRoutes = args[0]   // 缓存航线数据
     getActive()?.drawRoutes(...args)
   },
+  drawBackgroundRoutes: (...args) => getActive()?.drawBackgroundRoutes?.(...args),
   highlightRoute: (...args) => {
     _lastHighlightId = args[0]
     getActive()?.highlightRoute(...args)
