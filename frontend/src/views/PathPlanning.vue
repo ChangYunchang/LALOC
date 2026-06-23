@@ -626,8 +626,6 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   clearOldPath()
   mapRef.clearPlanPath()
 
-  await new Promise(r => setTimeout(r, 300))
-
   let adjustedPath = pathPoints
   let adjustedProfile = altitudeProfile
 

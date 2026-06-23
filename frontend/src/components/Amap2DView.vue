@@ -25,6 +25,7 @@ const amapSecurityCode = import.meta.env.VITE_AMAP_SECURITY_CODE
 const routeAnimState = {}
 let globalRafId = null
 let globalLastTime = 0
+let globalPanTick = 0  // 每 10 tick（≈500ms）才执行一次 panTo，避免地图跳动干扰操作
 
 // ── 颜色常量 ──────────────────────────────────
 const COLOR_NORMAL = '#10b981'
@@ -312,7 +313,8 @@ function startGlobalLoop() {
       if (isSelected) { droneLng = lng; droneLat = lat }
     })
 
-    if (selectedId !== null && droneLng !== null) {
+    globalPanTick++
+    if (selectedId !== null && droneLng !== null && globalPanTick % 10 === 0) {
       const map = mapStore.map
       if (map) map.panTo(new AMap.LngLat(droneLng, droneLat), false)
     }
@@ -497,12 +499,18 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopGlobalLoop()
+  clearTimeout(_renderZonesTimer)
   if (mapStore.map) mapStore.map.destroy()
   mapStore.setMap(null)
 })
 
-watch(() => zoneStore.noFlyZones, () => { renderZones() })
-watch(() => zoneStore.heightLimitZones, () => { renderZones() })
+let _renderZonesTimer = null
+function _renderZonesDebounced() {
+  clearTimeout(_renderZonesTimer)
+  _renderZonesTimer = setTimeout(renderZones, 60)
+}
+watch(() => zoneStore.noFlyZones, _renderZonesDebounced)
+watch(() => zoneStore.heightLimitZones, _renderZonesDebounced)
 watch(() => mapStore.routeDataList, (routes) => {
   if (routes?.length && mapStore.map) {
     setTimeout(() => drawRoutes(routes), 300)

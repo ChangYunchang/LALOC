@@ -309,7 +309,7 @@ def build_grid_from_db(
 
 
 def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
-    """Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞的网格。"""
+    """Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞或越界的网格。"""
     r0, col0 = c1.row, c1.col
     r1, col1 = c2.row, c2.col
     dr = abs(r1 - r0)
@@ -319,7 +319,8 @@ def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
     err = dr - dc
     r, c = r0, col0
     while True:
-        if grid.is_blocked(GridCell(r, c)):
+        cell = GridCell(r, c)
+        if not grid.is_valid(cell) or grid.is_blocked(cell):
             return False
         if r == r1 and c == col1:
             return True
@@ -508,7 +509,7 @@ def compute_altitude_profile(
                     in_height_limit[i] = True
                     min_height_limit[i] = min(min_height_limit[i], zone["max_altitude"])
 
-    # ── 2. 查询建筑物（高效：采样路径点，单次SQL聚合查询）────
+    # ── 2. 查询建筑物（单次批量 SQL，避免 N 次往返）────────
     building_height_at_point = [0.0] * n
 
     try:
@@ -516,29 +517,38 @@ def compute_altitude_profile(
             text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'buildings')")
         ).fetchone()[0]
 
-        if table_exists:
-            # 全采样路径点，确保不遗漏任何建筑
-            sample_indices = list(range(0, n))  # 每个点采样，确保不遗漏建筑
-            for idx in sample_indices:
-                lng, lat = path[idx]
-                # 单次查询：获取该点所在建筑的最高高度
-                result = db.execute(
-                    text("""
-                        SELECT MAX(COALESCE(height, levels * 3.0, 10))
-                        FROM buildings
-                        WHERE ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
-                        AND (height >= 15 OR levels >= 5 OR (height IS NULL AND levels IS NULL))
-                    """),
-                    {"lng": lng, "lat": lat}
-                ).fetchone()
+        if table_exists and n > 0:
+            # 用 VALUES 子句一次性传入所有路径点，单次联表查询返回每点最大建筑高度
+            values_rows = ", ".join(f"({i}, :lng_{i}, :lat_{i})" for i in range(n))
+            params: dict = {}
+            for i, (lng, lat) in enumerate(path):
+                params[f"lng_{i}"] = lng
+                params[f"lat_{i}"] = lat
 
-                if result and result[0] and result[0] > 0:
-                    # 将建筑高度应用到该采样点及其附近的点
+            rows = db.execute(
+                text(f"""
+                    WITH pts(idx, lng, lat) AS (VALUES {values_rows})
+                    SELECT pts.idx,
+                           MAX(COALESCE(b.height, b.levels * 3.0, 10)) AS max_height
+                    FROM pts
+                    LEFT JOIN buildings b
+                        ON ST_Contains(b.geometry,
+                               ST_SetSRID(ST_MakePoint(pts.lng, pts.lat), 4326))
+                        AND (b.height >= 15
+                             OR b.levels >= 5
+                             OR (b.height IS NULL AND b.levels IS NULL))
+                    GROUP BY pts.idx
+                """),
+                params,
+            ).fetchall()
+
+            for row in rows:
+                idx, max_height = row
+                if max_height and float(max_height) > 0:
+                    h = float(max_height)
+                    # 将建筑高度扩散到相邻 ±2 个点，避免爬升段过短
                     for j in range(max(0, idx - 2), min(n, idx + 3)):
-                        building_height_at_point[j] = max(
-                            building_height_at_point[j],
-                            float(result[0])
-                        )
+                        building_height_at_point[j] = max(building_height_at_point[j], h)
     except Exception as e:
         print(f"  [提示] 建筑高度查询跳过: {e}")
 
