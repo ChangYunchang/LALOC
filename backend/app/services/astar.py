@@ -354,95 +354,103 @@ def _smooth_cells(grid: GridMap, cells: list[GridCell]) -> list[GridCell]:
     return result
 
 
+def _move_cost(grid: GridMap, c1: GridCell, c2: GridCell) -> float:
+    """两格栅间移动代价：物理距离 + 限高 / 建筑惩罚"""
+    base = grid.distance(c1, c2)
+    nkey = (c2.row, c2.col)
+    height_limit = grid.height_limits.get(nkey)
+    if height_limit is not None and height_limit < 50:
+        base *= 2.0
+    building_h = grid.building_heights.get(nkey, 0)
+    if building_h > 100:
+        base *= (1.0 + building_h / 200.0)
+    return base
+
+
 def astar_search(
     grid: GridMap,
     start_lng: float, start_lat: float,
     end_lng: float, end_lat: float,
 ) -> Optional[list[tuple[float, float]]]:
     """
-    A* 搜索算法（含视线拉直后处理）
+    Theta* 任意角度路径搜索（从算法根源消除 A* 网格搜索产生的阶梯折线震荡）
+
+    传统 A* 只能沿网格边移动，产生阶梯状路径，事后 string-pulling 无法根治
+    紧贴禁飞区边界的尖锐折角。Theta* 在扩展每个节点时检查其祖父节点对邻居
+    是否有直线视线（LOS）：若有，直接连接祖父→邻居跳过父节点，从而在搜索
+    阶段本身产生任意角度的平滑路径。
 
     返回: 路径点列表 [(lng, lat), ...]，或 None（不可达）
     """
     start_cell = grid.lnglat_to_cell(start_lng, start_lat)
     end_cell = grid.lnglat_to_cell(end_lng, end_lat)
 
-    # 检查起点和终点是否可达
-    if grid.is_blocked(start_cell):
-        return None
-    if grid.is_blocked(end_cell):
+    if grid.is_blocked(start_cell) or grid.is_blocked(end_cell):
         return None
 
-    # 初始化
-    open_set: list[AStarNode] = []
+    open_heap: list = []
     closed_set: set[tuple[int, int]] = set()
+    g_scores: dict[tuple[int, int], float] = {}
+    # 每个格栅的最优父节点（GridCell 或 None 表示起点）
+    parent_map: dict[tuple[int, int], Optional[GridCell]] = {}
+    _seq = 0  # 单调递增序号，打破 f 相等时堆比较的不确定性（避免随机锯齿）
 
-    start_node = AStarNode(
-        f_cost=grid.distance(start_cell, end_cell),
-        cell=start_cell,
-        g_cost=0,
-    )
-    heapq.heappush(open_set, start_node)
+    s_key = (start_cell.row, start_cell.col)
+    g_scores[s_key] = 0.0
+    parent_map[s_key] = None
+    h0 = grid.distance(start_cell, end_cell)
+    heapq.heappush(open_heap, (h0, _seq, start_cell))
 
-    # 记录每个节点的最优 g_cost
-    g_scores: dict[tuple[int, int], float] = {(start_cell.row, start_cell.col): 0}
+    max_iter = grid.rows * grid.cols * 2
 
-    iterations = 0
-    max_iterations = grid.rows * grid.cols  # 防止无限循环
+    for _ in range(max_iter):
+        if not open_heap:
+            break
 
-    while open_set and iterations < max_iterations:
-        iterations += 1
-        current = heapq.heappop(open_set)
+        _, _, current = heapq.heappop(open_heap)
+        c_key = (current.row, current.col)
 
-        # 到达终点
-        if current.cell == end_cell:
-            # 回溯格栅路径
+        if c_key in closed_set:
+            continue
+        closed_set.add(c_key)
+
+        if current == end_cell:
+            # 沿 parent_map 回溯路径（节点已是任意角度的关键拐点）
             cells: list[GridCell] = []
-            node = current
-            while node:
-                cells.append(node.cell)
-                node = node.parent
+            node: Optional[GridCell] = current
+            while node is not None:
+                cells.append(node)
+                node = parent_map.get((node.row, node.col))
             cells.reverse()
-            # 视线拉直：去除 A* 阶梯锯齿
+            # 额外 string-pulling：消除 Theta* 残余的轻微锯齿
             cells = _smooth_cells(grid, cells)
             return [grid.cell_to_lnglat(c.row, c.col) for c in cells]
 
-        key = (current.cell.row, current.cell.col)
-        if key in closed_set:
-            continue
-        closed_set.add(key)
+        g_s = g_scores[c_key]
+        # current 的父节点，用于 Theta* 祖父视线检查
+        grandparent: Optional[GridCell] = parent_map.get(c_key)
 
-        # 扩展邻居
-        for neighbor in grid.get_neighbors(current.cell):
-            nkey = (neighbor.row, neighbor.col)
-            if nkey in closed_set:
+        for neighbor in grid.get_neighbors(current):
+            n_key = (neighbor.row, neighbor.col)
+            if n_key in closed_set:
                 continue
 
-            # 计算移动代价
-            move_cost = grid.distance(current.cell, neighbor)
-            # 限高区惩罚（降低优先级但不阻断）
-            height_limit = grid.height_limits.get(nkey)
-            if height_limit is not None and height_limit < 50:
-                move_cost *= 2  # 限高很低的区域增加代价
-            # 建筑物惩罚：高于巡航高度的建筑增加代价
-            building_h = grid.building_heights.get(nkey, 0)
-            if building_h > 100:  # 超过巡航高度
-                move_cost *= (1 + building_h / 200)  # 越高代价越大
+            # ── Theta* 核心：祖父节点对邻居若视线通畅，直接连接跳过父节点 ──
+            if grandparent is not None and _los_check(grid, grandparent, neighbor):
+                gp_key = (grandparent.row, grandparent.col)
+                new_g = g_scores[gp_key] + _move_cost(grid, grandparent, neighbor)
+                new_parent = grandparent
+            else:
+                # 标准 A* 弛豫：经由当前节点
+                new_g = g_s + _move_cost(grid, current, neighbor)
+                new_parent = current
 
-            new_g = current.g_cost + move_cost
-
-            if new_g < g_scores.get(nkey, float('inf')):
-                g_scores[nkey] = new_g
+            if new_g < g_scores.get(n_key, float('inf')):
+                g_scores[n_key] = new_g
+                parent_map[n_key] = new_parent
                 h = grid.distance(neighbor, end_cell)
-                f = new_g + h
-
-                neighbor_node = AStarNode(
-                    f_cost=f,
-                    cell=neighbor,
-                    g_cost=new_g,
-                    parent=current,
-                )
-                heapq.heappush(open_set, neighbor_node)
+                _seq += 1
+                heapq.heappush(open_heap, (new_g + h, _seq, neighbor))
 
     return None  # 不可达
 
