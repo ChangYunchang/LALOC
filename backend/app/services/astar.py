@@ -103,8 +103,14 @@ class GridMap:
                     continue
                 nr, nc = cell.row + dr, cell.col + dc
                 neighbor = GridCell(nr, nc)
-                if self.is_valid(neighbor) and not self.is_blocked(neighbor):
-                    neighbors.append(neighbor)
+                if not self.is_valid(neighbor) or self.is_blocked(neighbor):
+                    continue
+                # 对角移动时，若两个拐角格均被阻塞则拒绝（防止从禁飞区角点穿越）
+                if dr != 0 and dc != 0:
+                    if self.is_blocked(GridCell(cell.row + dr, cell.col)) and \
+                       self.is_blocked(GridCell(cell.row, cell.col + dc)):
+                        continue
+                neighbors.append(neighbor)
         return neighbors
 
     def distance(self, cell1: GridCell, cell2: GridCell) -> float:
@@ -171,6 +177,18 @@ def build_grid_from_db(
                 ).fetchone()
                 if result and result[0]:
                     grid.blocked.add((row, col))
+
+    # 禁飞区安全缓冲：向外扩展 1 格，确保路径不紧贴区域边界
+    # （解决网格中心点判定导致的边界格漏判问题）
+    if grid.blocked:
+        buffer_cells: set[tuple[int, int]] = set()
+        for row, col in grid.blocked:
+            for dr in range(-1, 2):
+                for dc in range(-1, 2):
+                    nr, nc = row + dr, col + dc
+                    if 0 <= nr < grid.rows and 0 <= nc < grid.cols:
+                        buffer_cells.add((nr, nc))
+        grid.blocked.update(buffer_cells)
 
     # 查询限高区并记录限高信息
     height_limit_zones = db.query(HeightLimitZone).all()
@@ -309,7 +327,11 @@ def build_grid_from_db(
 
 
 def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
-    """Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞或越界的网格。"""
+    """
+    Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞或越界的网格。
+
+    额外检查对角步进时的两个拐角格，防止路径从两个对角阻塞格的夹缝穿越禁飞区边界。
+    """
     r0, col0 = c1.row, c1.col
     r1, col1 = c2.row, c2.col
     dr = abs(r1 - r0)
@@ -325,10 +347,19 @@ def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
         if r == r1 and c == col1:
             return True
         e2 = 2 * err
-        if e2 > -dc:
+        move_r = e2 > -dc
+        move_c = e2 < dr
+        # 对角步进时检查两个拐角格：若任一被阻塞，视线穿过禁飞区边界，返回不可见
+        if move_r and move_c:
+            cr = GridCell(r + sr, c)
+            cc = GridCell(r, c + sc)
+            if (grid.is_valid(cr) and grid.is_blocked(cr)) or \
+               (grid.is_valid(cc) and grid.is_blocked(cc)):
+                return False
+        if move_r:
             err -= dc
             r += sr
-        if e2 < dr:
+        if move_c:
             err += dr
             c += sc
 
