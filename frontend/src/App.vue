@@ -14,7 +14,13 @@
           态势大屏
         </router-link>
 
-        <!-- 下拉菜单：各子系统 -->
+        <!-- 安全缓冲分析（单页，直接链接）-->
+        <router-link to="/safety-buffer/analysis" class="nav-link" active-class="active">
+          <el-icon><Lock /></el-icon>
+          安全缓冲分析
+        </router-link>
+
+        <!-- 下拉菜单：多子页面的子系统 -->
         <div
           v-for="menu in dropdownMenus"
           :key="menu.label"
@@ -86,14 +92,6 @@ const dropdownMenus = [
     children: [
       { path: '/path-planning', label: '智能路径规划' },
       { path: '/emergency-routing', label: '应急航路规划' },
-    ],
-  },
-  {
-    label: '安全缓冲分析',
-    icon: 'Lock',
-    paths: ['/safety-buffer'],
-    children: [
-      { path: '/safety-buffer/analysis', label: '安全缓冲区分析' },
     ],
   },
   {
