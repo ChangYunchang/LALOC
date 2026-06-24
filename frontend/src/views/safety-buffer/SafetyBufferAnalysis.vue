@@ -166,10 +166,10 @@
             <span class="legend-swatch" style="background:#f59e0b"></span>下降段
           </div>
           <div class="legend-item">
-            <span class="legend-swatch" style="background:#ef4444"></span>建筑避让（抬升）
+            <span class="legend-swatch" style="background:#a855f7"></span>建筑避让（抬升）
           </div>
           <div class="legend-item">
-            <span class="legend-swatch" style="background:#f97316"></span>限高区（压低）
+            <span class="legend-swatch" style="background:#ef4444"></span>限高区（压低）
           </div>
           <div class="legend-divider"></div>
           <div class="legend-item" style="font-weight:600;color:#374151;font-size:11px">监测航线</div>
@@ -229,8 +229,8 @@ const PHASE_COLORS = {
   ascent: '#22c55e',
   cruise: '#3b82f6',
   descent: '#f59e0b',
-  building: '#ef4444',
-  height_limit: '#f97316',
+  height_limit: '#ef4444',
+  building: '#a855f7',
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -679,7 +679,7 @@ function drawRouteLines() {
       const color = PHASE_COLORS[curPhase] || r.color
       const line = new AMap.Polyline({
         path: segPts.map(([lng, lat]) => [lng, lat]),
-        strokeColor: color, strokeWeight: 3, strokeOpacity: 0.85,
+        strokeColor: color, strokeWeight: 4, strokeOpacity: 0.8,
         lineJoin: 'round', lineCap: 'round', zIndex: 5,
       })
       map.add(line); routeLines2D.push(line)
