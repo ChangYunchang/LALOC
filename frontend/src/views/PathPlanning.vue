@@ -587,7 +587,7 @@ async function doPlan() {
       start, end,
       waypoints: waypointsList,
       drone_speed: droneSpeed.value,
-      suggested_alt: planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value,
+      cruise_alt: planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
       avoid_buildings: planningMode.value === 'points' ? avoidBuildings.value : false,

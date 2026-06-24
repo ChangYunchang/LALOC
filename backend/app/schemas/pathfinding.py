@@ -16,6 +16,7 @@ class PathPlanRequest(BaseModel):
     end: Coordinate = Field(..., description="终点")
     waypoints: Optional[list[Coordinate]] = Field(default=[], description="途经点列表")
     drone_speed: Optional[float] = Field(15.0, description="无人机速度(m/s)")
+    cruise_alt: Optional[float] = Field(100.0, description="巡航高度(米)，巡逻模式传离地高度")
     safety_margin: Optional[float] = Field(50.0, description="安全距离(米)")
     avoid_no_fly: Optional[bool] = Field(True, description="避开禁飞区")
     avoid_height_limit: Optional[bool] = Field(True, description="避开限高区")

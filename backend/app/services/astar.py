@@ -611,6 +611,7 @@ def plan_path(
     waypoints: list[tuple[float, float]] = None,
     cell_size_meters: float = 50,
     drone_speed: float = 15.0,
+    cruise_alt: float = 100.0,
     safety_margin: float = 50.0,
     avoid_buildings: bool = True,
     consider_weather: bool = True,
@@ -700,7 +701,7 @@ def plan_path(
     estimated_time = total_distance / drone_speed if drone_speed > 0 else total_distance / 15.0
 
     # 计算高度剖面（考虑限高区和建筑物高度）
-    altitude_profile = compute_altitude_profile(db, full_path, building_safety_margin=safety_margin)
+    altitude_profile = compute_altitude_profile(db, full_path, cruise_alt=cruise_alt, building_safety_margin=safety_margin)
 
     return {
         "path": [
