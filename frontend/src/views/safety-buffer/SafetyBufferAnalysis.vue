@@ -172,10 +172,12 @@
             <span class="legend-swatch" style="background:#ef4444"></span>限高区（压低）
           </div>
           <div class="legend-divider"></div>
-          <div class="legend-item" style="font-weight:600;color:#374151;font-size:11px">监测航线</div>
-          <div class="legend-item" v-for="r in ROUTES" :key="r.id">
+          <div class="legend-item" style="font-weight:600;color:#374151;font-size:11px">全部航线</div>
+          <div class="legend-item" v-for="r in SAMPLE_ROUTES" :key="r.id">
             <span class="legend-swatch" :style="{ background: r.color }"></span>
-            {{ r.name }}
+            <span :style="ROUTES.some(m => m.id === r.id) ? 'font-weight:600;color:#1d4ed8' : ''">
+              {{ r.name }}{{ ROUTES.some(m => m.id === r.id) ? ' ★' : '' }}
+            </span>
           </div>
         </div>
       </div>
@@ -665,7 +667,7 @@ async function initAMap() {
 
 function drawRouteLines() {
   if (!map || !AMap) return
-  ROUTES.forEach(r => {
+  SAMPLE_ROUTES.forEach(r => {
     const pts   = r.pts
     const profile = r.altitude_profile || []
 
