@@ -52,7 +52,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
-import { DENSITY_ROUTES } from '@/data/sampleRoutes'
+import { DENSITY_ROUTES, SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 // ── 时段配置 ─────────────────────────────────────────
 const timePeriods = [
@@ -129,7 +129,7 @@ function drawRouteLines2D() {
   if (!amapInst || !AMap) return
   routeLineOverlays2D.forEach(o => amapInst.remove(o))
   routeLineOverlays2D = []
-  ROUTES.forEach(route => {
+  SAMPLE_ROUTES.forEach(route => {
     const line = new AMap.Polyline({
       path: route.pts.map(([lng, lat]) => [lng, lat]),
       strokeColor: route.color,

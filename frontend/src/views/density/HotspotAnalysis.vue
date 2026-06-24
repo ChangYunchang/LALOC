@@ -77,7 +77,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
-import { DENSITY_ROUTES } from '@/data/sampleRoutes'
+import { DENSITY_ROUTES, SAMPLE_ROUTES } from '@/data/sampleRoutes'
 import { ElMessage } from 'element-plus'
 
 const densityThreshold = ref(20)
@@ -140,7 +140,7 @@ function clearOverlays() {
 
 function drawRouteLines2D() {
   if (!amapInst || !AMap) return
-  ROUTES.forEach(route => {
+  SAMPLE_ROUTES.forEach(route => {
     const line = new AMap.Polyline({
       path: route.pts.map(([lng, lat]) => [lng, lat]),
       strokeColor: route.color,
