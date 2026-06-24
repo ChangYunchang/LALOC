@@ -197,6 +197,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { ElMessage } from 'element-plus'
+import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 // ── 常量数据 ──────────────────────────────────────────
 const ALERT_REASONS = [
@@ -228,37 +229,37 @@ const CHARGING_STATIONS = [
   { id: 6, name: '越秀南维修站',   lng: 113.3115, lat: 23.0735, available: 4, capacity: 6,  type: 'repair' },
 ]
 
-// 飞行中无人机 — 位置置于对应示例航线的中段，routeCoords 与 sampleRoutes.js 保持一致
+// 飞行中无人机 — routeCoords 直接取 SAMPLE_ROUTES 的 Catmull-Rom 插值点，保证与态势大屏一致
 const DRONES = [
   {
     id: 1, name: 'GZ-A001', battery: 18, alertReason: 'low_battery',
     routeName: '番禺→天河干线', region: '天河南路上空',
     position: { lng: 113.3100, lat: 23.1050 },
-    routeCoords: [[113.2671,23.0900],[113.2900,23.0980],[113.3100,23.1050],[113.3245,23.1201]],
+    routeCoords: SAMPLE_ROUTES[0].pts,
   },
   {
     id: 2, name: 'GZ-A002', battery: 63, alertReason: 'comm_loss',
     routeName: '白云→天河横线', region: '白云中路上空',
     position: { lng: 113.3100, lat: 23.1380 },
-    routeCoords: [[113.2994,23.1540],[113.3100,23.1380],[113.3245,23.1201],[113.3400,23.1050]],
+    routeCoords: SAMPLE_ROUTES[1].pts,
   },
   {
     id: 3, name: 'GZ-B001', battery: 31, alertReason: 'device_fault',
     routeName: '黄埔→白云线', region: '黄埔大道上空',
     position: { lng: 113.3400, lat: 23.1201 },
-    routeCoords: [[113.3580,23.1050],[113.3400,23.1201],[113.3245,23.1201],[113.3100,23.1050]],
+    routeCoords: SAMPLE_ROUTES[2].pts,
   },
   {
     id: 4, name: 'GZ-B002', battery: 47, alertReason: 'device_fault',
     routeName: '番禺→天河南线', region: '番禺大桥上空',
     position: { lng: 113.3100, lat: 23.0900 },
-    routeCoords: [[113.2994,23.0750],[113.3100,23.0900],[113.3245,23.1050],[113.3400,23.1201]],
+    routeCoords: SAMPLE_ROUTES[8].pts,
   },
   {
     id: 5, name: 'GZ-C001', battery: 76, alertReason: 'comm_loss',
     routeName: '越秀纵向线', region: '越秀中山大道上空',
     position: { lng: 113.3100, lat: 23.1200 },
-    routeCoords: [[113.3100,23.0750],[113.3100,23.1050],[113.3100,23.1380],[113.3100,23.1600]],
+    routeCoords: SAMPLE_ROUTES[5].pts,
   },
 ]
 
