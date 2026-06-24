@@ -830,23 +830,45 @@ function buildCesiumEntities() {
   cesiumViewer.entities.removeAll()
   Object.keys(cesiumDronePositions).forEach(k => delete cesiumDronePositions[k])
 
-  // 绘制航线（虚线，高度来自 altitude_profile）
-  ROUTES.forEach(r => {
-    const positions = r.pts.flatMap(([lng, lat], i) => {
-      const alt = r.altitude_profile?.[i]?.alt ?? 120
-      return [lng, lat, alt]
-    })
-    cesiumViewer.entities.add({
-      polyline: {
-        positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
-        width: 2,
-        material: new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.fromCssColorString(r.color).withAlpha(0.5),
-          dashLength: 16,
-        }),
-        clampToGround: false,
-      },
-    })
+  // 绘制全部航线（按飞行阶段分段着色，虚线，高度来自 altitude_profile）
+  SAMPLE_ROUTES.forEach(r => {
+    const pts = r.pts
+    const altProfile = r.altitude_profile || []
+    const n = pts.length
+
+    // 检测阶段边界（与 2D drawRouteLines 逻辑一致）
+    const boundaries = [0]
+    for (let i = 1; i < n; i++) {
+      if ((altProfile[i]?.phase || 'cruise') !== (altProfile[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
+
+    for (let b = 0; b < boundaries.length; b++) {
+      const startIdx = boundaries[b]
+      const endIdx   = b < boundaries.length - 1 ? boundaries[b + 1] : n - 1
+      const phase    = altProfile[startIdx]?.phase || 'cruise'
+      const color    = PHASE_COLORS[phase] || PHASE_COLORS.cruise
+
+      const segCoords = []
+      for (let i = startIdx; i <= endIdx; i++) {
+        const [lng, lat] = pts[i]
+        segCoords.push(lng, lat, altProfile[i]?.alt ?? 120)
+      }
+      if (segCoords.length < 6) continue
+
+      cesiumViewer.entities.add({
+        polyline: {
+          positions: Cesium.Cartesian3.fromDegreesArrayHeights(segCoords),
+          width: 3,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.fromCssColorString(color).withAlpha(0.75),
+            dashLength: 16,
+          }),
+          clampToGround: false,
+        },
+      })
+    }
   })
 
   // 为每架无人机创建实体
