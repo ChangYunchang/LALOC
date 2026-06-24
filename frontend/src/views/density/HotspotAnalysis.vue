@@ -94,7 +94,6 @@ const ROUTES = DENSITY_ROUTES
 const HOTSPOT_DEFINITIONS = [
   { id: 1, name: '天河中心枢纽',   lng: 113.3245, lat: 23.1201, baseCount: { all: 68, morning: 85, noon: 42, evening: 91 }, routeIds: [0,1,2,7,8], peak: '18:00-19:00', level: 'high' },
   { id: 2, name: '白云东路交汇点', lng: 113.3100, lat: 23.1050, baseCount: { all: 54, morning: 72, noon: 38, evening: 76 }, routeIds: [0,2,5,6],   peak: '08:30-09:30', level: 'high' },
-  { id: 3, name: '荔湾航路交叉区', lng: 113.2994, lat: 23.1380, baseCount: { all: 41, morning: 55, noon: 28, evening: 60 }, routeIds: [1,4,5],     peak: '08:00-10:00', level: 'medium' },
   { id: 4, name: '天河南部节点',   lng: 113.3245, lat: 23.1050, baseCount: { all: 37, morning: 48, noon: 30, evening: 52 }, routeIds: [4,6,8],     peak: '14:00-16:00', level: 'medium' },
   { id: 5, name: '黄埔东部走廊',   lng: 113.3580, lat: 23.1050, baseCount: { all: 29, morning: 38, noon: 22, evening: 44 }, routeIds: [2,3],       peak: '09:00-10:00', level: 'medium' },
   { id: 6, name: '越秀纵向通道',   lng: 113.3100, lat: 23.1380, baseCount: { all: 25, morning: 32, noon: 18, evening: 38 }, routeIds: [1,4,5],     peak: '18:30-19:30', level: 'medium' },
