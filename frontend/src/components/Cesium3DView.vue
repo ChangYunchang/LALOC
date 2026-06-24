@@ -1054,7 +1054,8 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
 }
 
 // 核心绘制逻辑（同步），接受任意高度剖面（初始或校正后均可）
-function _drawPlanPathCore(pathPoints, altitudeProfile) {
+// terrainHeights: 与 pathPoints 等长的地形海拔数组（米），null 表示无地形数据（退化为 alt 直接当 MSL）
+function _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights = null) {
   if (!viewer || !pathPoints?.length) return
 
   const C = (hex) => Cesium.Color.fromCssColorString(hex)
@@ -1066,7 +1067,10 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
 
   if (!hasProfile) {
-    const positions = pathPoints.map(p => Cesium.Cartesian3.fromDegrees(p.lng, p.lat, 120))
+    const positions = pathPoints.map((p, i) => {
+      const groundH = terrainHeights ? (terrainHeights[i] ?? 0) : 0
+      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, groundH + 120)
+    })
     planPathEntities.push(viewer.entities.add({
       polyline: { positions, width: 5, material: C('#3b82f6'), clampToGround: false }
     }))
@@ -1089,8 +1093,9 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
     if (segPts.length < 2) continue
 
     const positions = segPts.map((p, k) => {
-      const alt = altitudeProfile[startIdx + k]?.alt ?? 120
-      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt)
+      const agl      = altitudeProfile[startIdx + k]?.alt ?? 120
+      const groundH  = terrainHeights ? (terrainHeights[startIdx + k] ?? 0) : 0
+      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, groundH + agl)
     })
 
     const isAvoid = phase === 'building' || phase === 'no_fly'
@@ -1121,8 +1126,10 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
   for (let bi = 1; bi < boundaries.length - 1; bi++) {
     const idx = boundaries[bi]
     const p   = pathPoints[idx]
-    const alt = altitudeProfile[idx]?.alt ?? 0
-    if (!alt) continue
+    const agl = altitudeProfile[idx]?.alt ?? 0
+    if (!agl) continue
+    const groundH = terrainHeights ? (terrainHeights[idx] ?? 0) : 0
+    const alt = groundH + agl
     planPathEntities.push(viewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt + 30),
       label: {
@@ -1140,6 +1147,21 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
 }
 
 // 外部接口：先用服务端剖面立即绘制，再异步用真实 OSM 建筑做细密横向避让重绘
+// 采样路径各点的地形海拔，返回与 pathPoints 等长的高度数组（米）
+// EllipsoidTerrainProvider（无地形）时返回 null
+async function _sampleTerrainHeights(pathPoints) {
+  const tp = viewer?.terrainProvider
+  if (!tp || tp instanceof Cesium.EllipsoidTerrainProvider) return null
+  try {
+    const cartos = pathPoints.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
+    const sampled = await Cesium.sampleTerrainMostDetailed(tp, cartos)
+    return sampled.map(c => c.height ?? 0)
+  } catch (e) {
+    console.warn('[Cesium] 地形采样失败，AGL 将作为 MSL 使用:', e.message)
+    return null
+  }
+}
+
 async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   // 绘制令牌：若本次 drawPlanPath 尚未完成时又发起新的，则旧调用在每个 await 后检查并退出
   const drawToken = ++_drawToken
@@ -1148,9 +1170,18 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   clearPlanPath()
   if (!viewer || !pathPoints?.length) return
 
-  // 第一步：立即展示服务端路径（快速反馈）
-  _drawPlanPathCore(pathPoints, altitudeProfile)
+  // 第一步：采样地形高度（AGL → MSL 转换），再绘制路径
+  // 先渲染一帧占位（避免白屏感），然后异步取地形后立即重绘
+  _drawPlanPathCore(pathPoints, altitudeProfile, null)
   viewer.scene.requestRender()
+
+  const terrainHeights = await _sampleTerrainHeights(pathPoints)
+  if (!drawAlive()) return
+  if (terrainHeights) {
+    clearPlanPath()
+    _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights)
+    viewer.scene.requestRender()
+  }
 
   // 第二步：异步避障重绘（仅在开启避障且有剖面时）
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
@@ -1166,7 +1197,9 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
       if (!drawAlive()) return   // 新规划已触发，丢弃旧结果
       if (planned && planned.path.length) {
         clearPlanPath()
-        _drawPlanPathCore(planned.path, planned.altitude_profile)
+        const th = await _sampleTerrainHeights(planned.path)
+        if (!drawAlive()) return
+        _drawPlanPathCore(planned.path, planned.altitude_profile, th)
         viewer.scene.requestRender()
         return
       }
@@ -1182,7 +1215,9 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
     if (!drawAlive()) return
     if (!corrected) return
     clearPlanPath()
-    _drawPlanPathCore(corrected, corrected)
+    const th = await _sampleTerrainHeights(corrected)
+    if (!drawAlive()) return
+    _drawPlanPathCore(corrected, corrected, th)
     viewer.scene.requestRender()
   } catch { /* 采样失败，保留初始绘制 */ }
 }
