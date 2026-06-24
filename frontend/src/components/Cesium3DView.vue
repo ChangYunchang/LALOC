@@ -416,6 +416,7 @@ function drawRoutes(routes) {
   clearRouteEntities()
   Object.keys(routeAnimState).forEach((k) => delete routeAnimState[k])
 
+  const SAMPLES = 12  // 与 generateSmoothCurvePositions 保持一致
   const droneNormalCanvas = makeDroneCanvas('#f59e0b')
   const droneHighlightCanvas = makeDroneCanvas('#10b981')
 
@@ -424,6 +425,7 @@ function drawRoutes(routes) {
 
     const coords = route.route_line.coordinates
     const altProfile = route.altitude_profile
+    const n = coords.length
 
     // 1. Catmull-Rom 平滑曲线（含起降弧），密集采样点
     let curvedPositions = generateSmoothCurvePositions(coords, altProfile)
@@ -431,18 +433,39 @@ function drawRoutes(routes) {
     const makeDepthFail = (color) =>
       new Cesium.PolylineDashMaterialProperty({ color: color.withAlpha(0.4), dashLength: 10 })
 
-    // 2. 平滑折线实体
-    const polylineEntity = viewer.entities.add({
-      polyline: {
-        positions: curvedPositions,
-        width: 4,
-        material: COL.normal,
-        depthFailMaterial: makeDepthFail(COL.normal),
-        clampToGround: false,
-      },
-    })
+    // 2. 按 altProfile 相位边界拆分段，每段独立着色
+    //    原始点 i 对应平滑曲线索引 i * SAMPLES
+    const boundaries = [0]
+    for (let i = 1; i < n; i++) {
+      if ((altProfile?.[i]?.phase || 'cruise') !== (altProfile?.[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
 
-    // 3. 起终点标记（与曲线端点精确重合）
+    const segMeta = []  // { entity, startSmooth, endSmooth }
+    for (let b = 0; b < boundaries.length; b++) {
+      const startOrig = boundaries[b]
+      const endOrig   = b < boundaries.length - 1 ? boundaries[b + 1] : n - 1
+      const phase     = altProfile?.[startOrig]?.phase || 'cruise'
+      const color     = COL.phase[phase] || COL.normal
+      const startSm   = startOrig * SAMPLES
+      const endSm     = endOrig   * SAMPLES
+      const segPts    = curvedPositions.slice(startSm, endSm + 1)
+      if (segPts.length < 2) continue
+
+      const pe = viewer.entities.add({
+        polyline: {
+          positions: segPts,
+          width: 4,
+          material: color,
+          depthFailMaterial: makeDepthFail(color),
+          clampToGround: false,
+        },
+      })
+      segMeta.push({ entity: pe, startSm, endSm })
+    }
+
+    // 3. 起终点标记
     const startEntity = viewer.entities.add({
       position: curvedPositions[0],
       point: {
@@ -460,8 +483,7 @@ function drawRoutes(routes) {
       },
     })
 
-    // 4. 无人机 Billboard：图像中心 = 实体坐标点，无像素偏移
-    //    → 任意相机角度下图标中心都精确落在航线曲线上
+    // 4. 无人机 Billboard
     const droneEntity = viewer.entities.add({
       position: curvedPositions[0],
       billboard: {
@@ -478,15 +500,19 @@ function drawRoutes(routes) {
     droneEntity._normalImage = droneNormalCanvas
     droneEntity._highlightImage = droneHighlightCanvas
 
-    routeEntities[route.id] = { polylines: [polylineEntity], droneEntity, startEntity, endEntity }
+    routeEntities[route.id] = {
+      polylines: segMeta.map(s => s.entity),
+      droneEntity, startEntity, endEntity,
+    }
     routeAnimState[route.id] = { curvedPositions, droneEntity, progress: 0, route }
 
-    // 5. 异步抬升：在密集采样点上采样建筑高度，确保路段中间不穿模
-    //    关键：动画状态与折线使用同一组 positions，无人机与航线永远重合
+    // 5. 异步抬升后逐段更新 positions
     liftCurvedPositions(curvedPositions).then(liftedPositions => {
       if (!viewer || viewer.isDestroyed() || !routeEntities[route.id]) return
       curvedPositions = liftedPositions
-      polylineEntity.polyline.positions = new Cesium.ConstantProperty(liftedPositions)
+      segMeta.forEach(({ entity, startSm, endSm }) => {
+        entity.polyline.positions = new Cesium.ConstantProperty(liftedPositions.slice(startSm, endSm + 1))
+      })
       startEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[0])
       endEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[liftedPositions.length - 1])
       if (routeAnimState[route.id]) {
