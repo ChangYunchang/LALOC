@@ -8,11 +8,37 @@
       </div>
 
       <nav class="header-nav">
-        <!-- 态势监控 -->
+        <!-- 态势大屏 -->
         <router-link to="/dashboard" class="nav-link" active-class="active">
           <el-icon><Monitor /></el-icon>
           态势大屏
         </router-link>
+
+        <!-- 航路规划（下拉）-->
+        <div
+          class="nav-dropdown"
+          :class="{ active: isMenuActive(routePlanningMenu) }"
+          @mouseenter="openMenu(routePlanningMenu.label)"
+          @mouseleave="closeMenu"
+        >
+          <span class="nav-dropdown-trigger">
+            <el-icon><MapLocation /></el-icon>
+            {{ routePlanningMenu.label }}
+            <el-icon class="arrow"><ArrowDown /></el-icon>
+          </span>
+          <div v-if="activeMenu === routePlanningMenu.label" class="dropdown-panel">
+            <router-link
+              v-for="item in routePlanningMenu.children"
+              :key="item.path"
+              :to="item.path"
+              class="dropdown-item"
+              active-class="active"
+              @click="closeMenu"
+            >
+              {{ item.label }}
+            </router-link>
+          </div>
+        </div>
 
         <!-- 安全缓冲分析（单页，直接链接）-->
         <router-link to="/safety-buffer/analysis" class="nav-link" active-class="active">
@@ -20,23 +46,21 @@
           安全缓冲分析
         </router-link>
 
-        <!-- 下拉菜单：多子页面的子系统 -->
+        <!-- 安全热力分析（下拉）-->
         <div
-          v-for="menu in dropdownMenus"
-          :key="menu.label"
           class="nav-dropdown"
-          :class="{ active: isMenuActive(menu) }"
-          @mouseenter="openMenu(menu.label)"
+          :class="{ active: isMenuActive(heatAnalysisMenu) }"
+          @mouseenter="openMenu(heatAnalysisMenu.label)"
           @mouseleave="closeMenu"
         >
           <span class="nav-dropdown-trigger">
-            <el-icon><component :is="iconMap[menu.icon]" /></el-icon>
-            {{ menu.label }}
+            <el-icon><TrendCharts /></el-icon>
+            {{ heatAnalysisMenu.label }}
             <el-icon class="arrow"><ArrowDown /></el-icon>
           </span>
-          <div v-if="activeMenu === menu.label" class="dropdown-panel">
+          <div v-if="activeMenu === heatAnalysisMenu.label" class="dropdown-panel">
             <router-link
-              v-for="item in menu.children"
+              v-for="item in heatAnalysisMenu.children"
               :key="item.path"
               :to="item.path"
               class="dropdown-item"
@@ -74,37 +98,25 @@ const activeMenu = ref(null)
 let timer = null
 let closeTimer = null
 
-const iconMap = { MapLocation, Lock, TrendCharts }
+// 导航顺序：态势大屏 | 航路规划▼ | 安全缓冲分析 | 安全热力分析▼
+const routePlanningMenu = {
+  label: '航路规划',
+  paths: ['/path-planning', '/emergency-routing'],
+  children: [
+    { path: '/path-planning', label: '智能路径规划' },
+    { path: '/emergency-routing', label: '应急航路规划' },
+  ],
+}
 
-/**
- * 顶部导航下拉菜单配置
- * 严格对应 Structure.md 中的 4 个 GIS 子系统：
- *   1. 态势大屏（直接链接）
- *   2. 智能航路规划（下拉）
- *   3. 无人机安全缓冲区分析（下拉）
- *   4. 低空密度等值线分析（下拉）
- */
-const dropdownMenus = [
-  {
-    label: '航路规划',
-    icon: 'MapLocation',
-    paths: ['/path-planning', '/emergency-routing'],
-    children: [
-      { path: '/path-planning', label: '智能路径规划' },
-      { path: '/emergency-routing', label: '应急航路规划' },
-    ],
-  },
-  {
-    label: '安全热力分析',
-    icon: 'TrendCharts',
-    paths: ['/density'],
-    children: [
-      { path: '/density/contour', label: '安全风险热力分析' },
-      { path: '/density/hotspot', label: '低空拥堵识别' },
-      { path: '/density/stats', label: '区域密度统计' },
-    ],
-  },
-]
+const heatAnalysisMenu = {
+  label: '安全热力分析',
+  paths: ['/density'],
+  children: [
+    { path: '/density/contour', label: '安全风险热力分析' },
+    { path: '/density/hotspot', label: '低空拥堵识别' },
+    { path: '/density/stats', label: '区域密度统计' },
+  ],
+}
 
 function isMenuActive(menu) {
   return menu.paths.some(p => route.path.startsWith(p))
