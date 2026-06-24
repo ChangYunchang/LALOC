@@ -673,14 +673,16 @@ function drawRouteLines() {
     let curPhase = profile[0]?.phase || 'cruise'
     let segPts = [pts[0]]
 
-    const flushSeg = (extraPt) => {
+    const flushSeg = (extraPt, isLast = false) => {
       if (extraPt) segPts.push(extraPt)
       if (segPts.length < 2) return
       const color = PHASE_COLORS[curPhase] || r.color
       const line = new AMap.Polyline({
         path: segPts.map(([lng, lat]) => [lng, lat]),
-        strokeColor: color, strokeWeight: 4, strokeOpacity: 0.8,
-        lineJoin: 'round', lineCap: 'round', zIndex: 5,
+        strokeColor: color, strokeWeight: 5, strokeOpacity: 0.92,
+        isOutline: true, outlineColor: 'rgba(255,255,255,0.55)', borderWeight: 2,
+        showDir: isLast,
+        lineJoin: 'round', lineCap: 'round', zIndex: 10,
       })
       map.add(line); routeLines2D.push(line)
     }
@@ -688,21 +690,21 @@ function drawRouteLines() {
     for (let i = 1; i < pts.length; i++) {
       const phase = profile[i]?.phase || 'cruise'
       if (phase !== curPhase) {
-        flushSeg(pts[i])   // 过渡点同时作为新段起点，避免断缝
+        flushSeg(pts[i], false)
         curPhase = phase
         segPts = [pts[i]]
       } else {
         segPts.push(pts[i])
       }
     }
-    flushSeg()
+    flushSeg(null, true)   // 最后一段显示方向箭头
 
     // 起终点端点标记
-    ;[pts[0], pts[pts.length - 1]].forEach(([lng, lat]) => {
+    ;[pts[0], pts[pts.length - 1]].forEach(([lng, lat], idx) => {
       const dot = new AMap.CircleMarker({
-        center: [lng, lat], radius: 4,
-        strokeColor: r.color, strokeWeight: 1.5,
-        fillColor: r.color, fillOpacity: 0.9, zIndex: 15,
+        center: [lng, lat], radius: idx === 0 ? 5 : 6,
+        strokeColor: idx === 0 ? '#10b981' : r.color, strokeWeight: 2,
+        fillColor: idx === 0 ? '#10b981' : r.color, fillOpacity: 0.95, zIndex: 15,
       })
       map.add(dot); routeLines2D.push(dot)
     })

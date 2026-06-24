@@ -11,18 +11,27 @@
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
 
-/** 在控制点之间均匀插值，stepsPerSeg = 插值步数 */
-function interp(ctrlPts, stepsPerSeg = 8) {
+/**
+ * Catmull-Rom 样条插值：经过所有控制点的平滑曲线，每段 stepsPerSeg 步。
+ * 端点镜像（p[-1]=p[0], p[n]=p[n-1]）保证起终点切线自然。
+ */
+function catmullRom(ctrlPts, stepsPerSeg = 30) {
+  if (ctrlPts.length < 2) return ctrlPts.slice()
   const out = []
-  for (let i = 0; i < ctrlPts.length - 1; i++) {
-    const [x1, y1] = ctrlPts[i]
-    const [x2, y2] = ctrlPts[i + 1]
+  const n = ctrlPts.length
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = ctrlPts[Math.max(i - 1, 0)]
+    const p1 = ctrlPts[i]
+    const p2 = ctrlPts[i + 1]
+    const p3 = ctrlPts[Math.min(i + 2, n - 1)]
     const startK = i === 0 ? 0 : 1
     for (let k = startK; k <= stepsPerSeg; k++) {
-      const f = k / stepsPerSeg
+      const t  = k / stepsPerSeg
+      const t2 = t * t
+      const t3 = t2 * t
       out.push([
-        parseFloat((x1 + (x2 - x1) * f).toFixed(6)),
-        parseFloat((y1 + (y2 - y1) * f).toFixed(6)),
+        parseFloat((0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)).toFixed(6)),
+        parseFloat((0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)).toFixed(6)),
       ])
     }
   }
@@ -57,7 +66,7 @@ function buildRoute({ id, name, color, ctrlPts, w, status = 'active', special = 
   // 巡航高度按权重分级
   const ca = w >= 0.75 ? 150 : w >= 0.55 ? 130 : w >= 0.40 ? 120 : 110
 
-  const allPts = interp(ctrlPts)
+  const allPts = catmullRom(ctrlPts)
   const n = allPts.length
   const ASCENT_R = 0.13   // 前13%爬升
   const DESCENT_R = 0.13  // 后13%下降
@@ -136,13 +145,13 @@ const ROUTE_DEFS = [
   },
   {
     id: 6, name: '越秀纵向线', color: '#06b6d4', w: 0.75, status: 'active',
-    ctrlPts: [[113.3100,23.0750],[113.3100,23.1050],[113.3100,23.1380],[113.3100,23.1600]],
+    ctrlPts: [[113.3100,23.0750],[113.3082,23.1050],[113.3118,23.1380],[113.3100,23.1600]],
     // 越秀中段高层建筑密集，抬升 200m
     special: [{ start: 0.39, end: 0.59, phase: 'building', alt: 200 }],
   },
   {
     id: 7, name: '白云横向线', color: '#f97316', w: 0.38, status: 'planned',
-    ctrlPts: [[113.2500,23.1050],[113.2671,23.1050],[113.2994,23.1050],[113.3245,23.1050]],
+    ctrlPts: [[113.2500,23.1050],[113.2671,23.1068],[113.2994,23.1032],[113.3245,23.1050]],
   },
   {
     id: 8, name: '天河→黄埔线', color: '#64748b', w: 0.27, status: 'planned',

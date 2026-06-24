@@ -208,9 +208,12 @@ function drawRoutes(routes) {
           const polyline = new AMap.Polyline({
             path: segPoints,
             strokeColor: seg.color,
-            strokeWeight: 4,
-            strokeOpacity: 0.8,
-            showDir: seg.isLast,
+            strokeWeight: 5,
+            strokeOpacity: 0.92,
+            isOutline: true,
+            outlineColor: 'rgba(255,255,255,0.55)',
+            borderWeight: 2,
+            showDir: true,
             lineJoin: 'round',
             lineCap: 'round',
             zIndex: 100,
@@ -223,8 +226,11 @@ function drawRoutes(routes) {
       const polyline = new AMap.Polyline({
         path,
         strokeColor: COLOR_NORMAL,
-        strokeWeight: 4,
-        strokeOpacity: 0.8,
+        strokeWeight: 5,
+        strokeOpacity: 0.92,
+        isOutline: true,
+        outlineColor: 'rgba(255,255,255,0.55)',
+        borderWeight: 2,
         showDir: true,
         lineJoin: 'round',
         lineCap: 'round',
@@ -238,16 +244,16 @@ function drawRoutes(routes) {
 
     const startMarker = new AMap.Marker({
       position: path[0],
-      content: '<div style="width:12px;height:12px;background:#10b981;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.15);"></div>',
-      offset: new AMap.Pixel(-6, -6),
+      content: '<div style="width:14px;height:14px;background:#10b981;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7),
       zIndex: 110,
     })
     map.add(startMarker)
 
     const endMarker = new AMap.Marker({
       position: path[path.length - 1],
-      content: '<div style="width:12px;height:12px;background:#ef4444;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.15);"></div>',
-      offset: new AMap.Pixel(-6, -6),
+      content: '<div style="width:14px;height:14px;background:#ef4444;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7),
       zIndex: 110,
     })
     map.add(endMarker)
