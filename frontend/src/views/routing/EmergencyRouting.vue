@@ -17,10 +17,13 @@
         </div>
       </div>
 
-      <!-- 告警原因选择 -->
+      <!-- 告警原因筛选 -->
       <div class="section">
-        <div class="sect-label">告警原因</div>
-        <el-select v-model="alertReason" size="small" style="width:100%">
+        <div class="sect-label">
+          告警原因筛选
+          <span class="filter-count">{{ filteredDrones.length }}/{{ DRONES.length }}</span>
+        </div>
+        <el-select v-model="reasonFilter" size="small" style="width:100%">
           <el-option v-for="r in ALERT_REASONS" :key="r.value" :label="r.label" :value="r.value" />
         </el-select>
       </div>
@@ -29,11 +32,11 @@
       <div class="section">
         <div class="sect-label">
           飞行中无人机
-          <span class="count-badge">{{ DRONES.length }}</span>
+          <span class="count-badge">{{ filteredDrones.length }}</span>
           <span class="hint-text">点击触发告警</span>
         </div>
         <div class="drone-list">
-          <div v-for="d in DRONES" :key="d.id"
+          <div v-for="d in filteredDrones" :key="d.id"
             class="drone-card"
             :class="{ 'is-alert': alertDroneId === d.id, 'low-batt': d.battery < 30 }"
             @click="triggerAlert(d.id)">
@@ -45,12 +48,13 @@
             <div class="drone-row2">
               <span class="drone-region">📍 {{ d.region }}</span>
               <el-tag v-if="alertDroneId === d.id" type="danger" size="small" effect="dark">⚠ 告警中</el-tag>
-              <el-tag v-else-if="d.battery < 25" type="warning" size="small">低电量</el-tag>
+              <el-tag v-else :type="reasonTagType(d.alertReason)" size="small">{{ ALERT_REASON_LABELS[d.alertReason] }}</el-tag>
             </div>
             <div class="batt-bar-bg">
               <div class="batt-bar-fill" :style="{ width: d.battery+'%', background: battColor(d.battery) }"></div>
             </div>
           </div>
+          <div v-if="filteredDrones.length === 0" class="empty-filter">暂无此类告警无人机</div>
         </div>
       </div>
 
@@ -196,10 +200,17 @@ import { ElMessage } from 'element-plus'
 
 // ── 常量数据 ──────────────────────────────────────────
 const ALERT_REASONS = [
-  { value: 'low_battery', label: '⚡ 电量严重不足' },
+  { value: 'all',          label: '全部告警' },
+  { value: 'low_battery',  label: '⚡ 电量严重不足' },
   { value: 'device_fault', label: '🔧 设备故障迫降' },
-  { value: 'comm_loss',   label: '📡 通信失联备降' },
+  { value: 'comm_loss',    label: '📡 通信失联备降' },
 ]
+
+const ALERT_REASON_LABELS = {
+  low_battery:  '⚡ 电量不足',
+  device_fault: '🔧 设备故障',
+  comm_loss:    '📡 通信失联',
+}
 
 // 充电/维修站 — 均位于示例航线的关键节点附近
 const CHARGING_STATIONS = [
@@ -220,38 +231,33 @@ const CHARGING_STATIONS = [
 // 飞行中无人机 — 位置置于对应示例航线的中段，routeCoords 与 sampleRoutes.js 保持一致
 const DRONES = [
   {
-    id: 1, name: 'GZ-A001', battery: 18,
+    id: 1, name: 'GZ-A001', battery: 18, alertReason: 'low_battery',
     routeName: '番禺→天河干线', region: '天河南路上空',
     position: { lng: 113.3100, lat: 23.1050 },
-    // 航线 1 控制点
     routeCoords: [[113.2671,23.0900],[113.2900,23.0980],[113.3100,23.1050],[113.3245,23.1201]],
   },
   {
-    id: 2, name: 'GZ-A002', battery: 63,
+    id: 2, name: 'GZ-A002', battery: 63, alertReason: 'comm_loss',
     routeName: '白云→天河横线', region: '白云中路上空',
     position: { lng: 113.3100, lat: 23.1380 },
-    // 航线 2 控制点
     routeCoords: [[113.2994,23.1540],[113.3100,23.1380],[113.3245,23.1201],[113.3400,23.1050]],
   },
   {
-    id: 3, name: 'GZ-B001', battery: 31,
+    id: 3, name: 'GZ-B001', battery: 31, alertReason: 'device_fault',
     routeName: '黄埔→白云线', region: '黄埔大道上空',
     position: { lng: 113.3400, lat: 23.1201 },
-    // 航线 3 控制点
     routeCoords: [[113.3580,23.1050],[113.3400,23.1201],[113.3245,23.1201],[113.3100,23.1050]],
   },
   {
-    id: 4, name: 'GZ-B002', battery: 47,
+    id: 4, name: 'GZ-B002', battery: 47, alertReason: 'device_fault',
     routeName: '番禺→天河南线', region: '番禺大桥上空',
     position: { lng: 113.3100, lat: 23.0900 },
-    // 航线 9 控制点
     routeCoords: [[113.2994,23.0750],[113.3100,23.0900],[113.3245,23.1050],[113.3400,23.1201]],
   },
   {
-    id: 5, name: 'GZ-C001', battery: 76,
+    id: 5, name: 'GZ-C001', battery: 76, alertReason: 'comm_loss',
     routeName: '越秀纵向线', region: '越秀中山大道上空',
     position: { lng: 113.3100, lat: 23.1200 },
-    // 航线 6 控制点
     routeCoords: [[113.3100,23.0750],[113.3100,23.1050],[113.3100,23.1380],[113.3100,23.1600]],
   },
 ]
@@ -267,7 +273,7 @@ const PHASE_COLORS = {
 }
 
 // ── 响应式状态 ────────────────────────────────────────
-const alertReason = ref('low_battery')
+const reasonFilter = ref('all')       // 列表筛选器（不影响已触发告警的原因）
 const alertDroneId = ref(null)
 const selectedStationId = ref(null)
 const emergencyResult = ref(null)
@@ -279,7 +285,10 @@ let stationMarkers = [], droneOverlays = [], alertOverlays = [], routeOverlays =
 
 // ── 计算属性 ──────────────────────────────────────────
 const alertDrone = computed(() => DRONES.find(d => d.id === alertDroneId.value) || null)
-const currentReasonLabel = computed(() => ALERT_REASONS.find(r => r.value === alertReason.value)?.label || '')
+const currentReasonLabel = computed(() => ALERT_REASON_LABELS[alertDrone.value?.alertReason] || '')
+const filteredDrones = computed(() =>
+  reasonFilter.value === 'all' ? DRONES : DRONES.filter(d => d.alertReason === reasonFilter.value)
+)
 const estRange = computed(() => alertDrone.value ? alertDrone.value.battery * EST_RANGE_PER_PCT : 0)
 const estMinutes = computed(() => {
   if (!alertDrone.value) return 0
@@ -324,6 +333,12 @@ function battClass(p) {
   if (p <= 20) return 'batt-red'
   if (p <= 35) return 'batt-yellow'
   return 'batt-green'
+}
+function reasonTagType(reason) {
+  if (reason === 'low_battery')  return 'warning'
+  if (reason === 'device_fault') return 'danger'
+  if (reason === 'comm_loss')    return 'info'
+  return 'info'
 }
 
 // ── 路径规划算法 ──────────────────────────────────────
@@ -533,29 +548,29 @@ function drawEmergencyRoute(pts, altProfile) {
   map.add(arrowLine)
   routeOverlays.push(arrowLine)
 
-  // 起点标记
+  // 起点：在无人机位置正上方加"出发"小气泡，与无人机标记（在右下方）错开不重叠
+  const stn = selectedStation.value
   const startM = new AMap.Marker({
     position: [pts[0].lng, pts[0].lat],
-    content: `<div style="background:#dc2626;color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(220,38,38,.5);border:2px solid #fff;white-space:nowrap">
-      📍 ${alertDrone.value?.name} 出发
+    content: `<div style="background:#7f1d1d;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;opacity:.92;white-space:nowrap">
+      🛫 出发
     </div>`,
-    offset: new AMap.Pixel(-48, -18),
-    zIndex: 500,
+    offset: new AMap.Pixel(-22, -52),   // 出发气泡在无人机标记正上方，不与其重叠
+    zIndex: 490,
   })
   map.add(startM)
   routeOverlays.push(startM)
 
-  // 终点标记（充电/维修站）
+  // 终点：在站点标记正下方加"到达"小气泡，与站点标记（在正上方）错开
   const endP = pts[pts.length - 1]
-  const stn = selectedStation.value
   const endIcon = stn?.type === 'repair' ? '🔧' : '⚡'
   const endM = new AMap.Marker({
     position: [endP.lng, endP.lat],
-    content: `<div style="background:#16a34a;color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(22,163,74,.5);border:2px solid #fff;white-space:nowrap">
-      ${endIcon} ${stn?.name}
+    content: `<div style="background:#14532d;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;opacity:.92;white-space:nowrap">
+      ${endIcon} 目标到达
     </div>`,
-    offset: new AMap.Pixel(-52, -20),
-    zIndex: 500,
+    offset: new AMap.Pixel(-36, 10),    // 到达气泡在站点标记正下方，不与其重叠
+    zIndex: 490,
   })
   map.add(endM)
   routeOverlays.push(endM)
@@ -587,8 +602,7 @@ function triggerAlert(droneId) {
   selectedStationId.value = null
   alertDroneId.value = droneId
   const d = DRONES.find(d => d.id === droneId)
-  if (d && d.battery < 30) alertReason.value = 'low_battery'
-  ElMessage({ type: 'warning', message: `${d?.name} 已触发告警：${ALERT_REASONS.find(r=>r.value===alertReason.value)?.label}` })
+  ElMessage({ type: 'warning', message: `${d?.name} 已触发告警：${ALERT_REASON_LABELS[d?.alertReason] || '未知原因'}` })
 }
 
 function selectStation(stationId) {
@@ -645,7 +659,6 @@ async function planRoute() {
   }
 
   drawEmergencyRoute(pts, altitude_profile)
-  renderDroneRoutes()
 
   ElMessage({
     type: assessKey === 'insufficient' ? 'warning' : 'success',
@@ -725,7 +738,9 @@ onUnmounted(() => { map?.destroy() })
   letter-spacing: .6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
 }
 .count-badge { background: #2563eb; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 700; }
+.filter-count { font-size: 10px; color: #6b7280; font-weight: 400; letter-spacing: 0; margin-left: 2px; }
 .hint-text { font-size: 10px; color: #9ca3af; font-weight: 400; letter-spacing: 0; }
+.empty-filter { text-align: center; font-size: 12px; color: #9ca3af; padding: 14px 0; }
 
 /* Drone cards */
 .drone-list { display: flex; flex-direction: column; gap: 6px; }
