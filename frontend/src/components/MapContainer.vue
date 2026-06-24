@@ -10,6 +10,7 @@
     <Cesium3DView
       v-if="viewMode === '3D'"
       ref="cesium3DRef"
+      :show-routes="showRoutes"
     />
 
     <!-- 2D/3D 切换按钮 - 左上角 -->
@@ -43,6 +44,10 @@ import Amap2DView from './Amap2DView.vue'
 import Cesium3DView from './Cesium3DView.vue'
 import ZoneLegend from './ZoneLegend.vue'
 
+const props = defineProps({
+  showRoutes: { type: Boolean, default: true },
+})
+
 const viewMode = ref('2D')
 const amap2DRef = ref(null)
 const cesium3DRef = ref(null)
@@ -63,7 +68,7 @@ function switchMode(mode) {
     setTimeout(() => {
       const active = getActive()
       if (!active) return
-      if (_lastRoutes) active.drawRoutes(_lastRoutes)
+      if (_lastRoutes && props.showRoutes) active.drawRoutes(_lastRoutes)
       if (_lastHighlightId != null) active.highlightRoute(_lastHighlightId)
     }, 800) // 等待地图初始化
   })
@@ -71,7 +76,7 @@ function switchMode(mode) {
 
 // 监听 amap2DRef 就绪（防止 ref 异步赋值）
 watch(amap2DRef, (newRef) => {
-  if (newRef && _lastRoutes) {
+  if (newRef && _lastRoutes && props.showRoutes) {
     setTimeout(() => {
       newRef.drawRoutes?.(_lastRoutes)
       if (_lastHighlightId != null) newRef.highlightRoute?.(_lastHighlightId)
@@ -82,6 +87,7 @@ watch(amap2DRef, (newRef) => {
 defineExpose({
   viewMode,
   drawRoutes: (...args) => {
+    if (!props.showRoutes) return
     _lastRoutes = args[0]   // 缓存航线数据
     getActive()?.drawRoutes(...args)
   },

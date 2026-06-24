@@ -9,6 +9,10 @@ import { onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import { useMapStore } from '@/stores/map'
 import { useZoneStore } from '@/stores/zones'
 
+const props = defineProps({
+  showRoutes: { type: Boolean, default: true },
+})
+
 // 动态加载 Cesium — 仅在 3D 模式时加载，不阻塞页面
 let Cesium = null
 let cesiumStyleLoaded = false
@@ -201,11 +205,13 @@ async function createViewer() {
   mapStore.setCesiumViewer(viewer)
   renderZones()
 
-  const storedRoutes = mapStore.routeDataList
-  if (storedRoutes?.length) {
-    drawRoutes(storedRoutes)
-  } else if (lastRoutesData) {
-    drawRoutes(lastRoutesData)
+  if (props.showRoutes) {
+    const storedRoutes = mapStore.routeDataList
+    if (storedRoutes?.length) {
+      drawRoutes(storedRoutes)
+    } else if (lastRoutesData) {
+      drawRoutes(lastRoutesData)
+    }
   }
 
   setTimeout(() => {
@@ -420,7 +426,7 @@ function drawRoutes(routes) {
           clampToGround: false,
         },
       })
-      segMeta.push({ entity: pe, startSm, endSm })
+      segMeta.push({ entity: pe, startSm, endSm, phase, color })
     }
 
     // 3. 起终点标记
@@ -459,7 +465,8 @@ function drawRoutes(routes) {
     droneEntity._highlightImage = droneHighlightCanvas
 
     routeEntities[route.id] = {
-      polylines: segMeta.map(s => s.entity),
+      polylines: segMeta.map(s => s.entity),   // for clearRouteEntities / flyTo
+      polylineSegs: segMeta,                     // for highlight/reset (phase color info)
       droneEntity, startEntity, endEntity,
     }
     routeAnimState[route.id] = { curvedPositions, droneEntity, progress: 0, route }
@@ -527,10 +534,12 @@ function highlightRoute(routeId) {
   Object.entries(routeEntities).forEach(([id, group]) => {
     const isSelected = Number(id) === routeId
 
-    group.polylines?.forEach((p) => {
-      p.polyline.width = isSelected ? 6 : 2
-      p.polyline.material = isSelected ? COL.highlight : COL.normal.withAlpha(0.2)
-      p.show = true
+    group.polylineSegs?.forEach((seg) => {
+      seg.entity.polyline.width = isSelected ? 6 : 2
+      seg.entity.polyline.material = isSelected
+        ? (COL.phaseHighlight[seg.phase] || COL.highlight)
+        : (seg.color || COL.phase[seg.phase] || COL.normal).withAlpha(0.3)
+      seg.entity.show = true
     })
 
     if (group.droneEntity) {
@@ -559,10 +568,10 @@ function resetRouteHighlight() {
   mapStore.selectedRouteId = null
 
   Object.entries(routeEntities).forEach(([, group]) => {
-    group.polylines?.forEach((p) => {
-      p.polyline.width = 4
-      p.polyline.material = COL.normal
-      p.show = true
+    group.polylineSegs?.forEach((seg) => {
+      seg.entity.polyline.width = 4
+      seg.entity.polyline.material = seg.color || COL.phase[seg.phase] || COL.normal
+      seg.entity.show = true
     })
     if (group.droneEntity?.billboard) {
       group.droneEntity.billboard.scale = 1.0

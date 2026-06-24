@@ -253,7 +253,7 @@
 
     <!-- 地图区 — 使用统一的 MapContainer 组件 -->
     <div class="map-area">
-      <MapContainer ref="mapContainerRef" />
+      <MapContainer ref="mapContainerRef" :show-routes="false" />
 
     </div>
   </div>
