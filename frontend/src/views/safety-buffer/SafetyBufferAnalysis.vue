@@ -666,48 +666,48 @@ async function initAMap() {
 function drawRouteLines() {
   if (!map || !AMap) return
   ROUTES.forEach(r => {
-    const pts = r.pts
+    const pts   = r.pts
     const profile = r.altitude_profile || []
 
-    // 按飞行阶段分段着色（与态势大屏 / 路径规划页面同色）
-    let curPhase = profile[0]?.phase || 'cruise'
-    let segPts = [pts[0]]
+    // ── 与态势大屏 Amap2DView.drawRoutes 完全一致的分段算法 ──
+    const path = pts.map(([lng, lat]) => new AMap.LngLat(lng, lat))
 
-    const flushSeg = (extraPt, isLast = false) => {
-      if (extraPt) segPts.push(extraPt)
-      if (segPts.length < 2) return
-      const color = PHASE_COLORS[curPhase] || r.color
+    const boundaries = [0]
+    for (let i = 1; i < path.length; i++) {
+      if ((profile[i]?.phase || 'cruise') !== (profile[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
+    for (let b = 0; b < boundaries.length; b++) {
+      const startIdx = boundaries[b]
+      const endIdx   = b < boundaries.length - 1 ? boundaries[b + 1] : path.length - 1
+      const phase    = profile[startIdx]?.phase || 'cruise'
+      const color    = PHASE_COLORS[phase] || '#10b981'
+      const segPts   = path.slice(startIdx, endIdx + 1)
+      if (segPts.length < 2) continue
       const line = new AMap.Polyline({
-        path: segPts.map(([lng, lat]) => [lng, lat]),
+        path: segPts,
         strokeColor: color, strokeWeight: 5, strokeOpacity: 0.92,
         isOutline: true, outlineColor: 'rgba(255,255,255,0.55)', borderWeight: 2,
-        showDir: isLast,
-        lineJoin: 'round', lineCap: 'round', zIndex: 10,
+        showDir: true,
+        lineJoin: 'round', lineCap: 'round', zIndex: 100,
       })
       map.add(line); routeLines2D.push(line)
     }
 
-    for (let i = 1; i < pts.length; i++) {
-      const phase = profile[i]?.phase || 'cruise'
-      if (phase !== curPhase) {
-        flushSeg(pts[i], false)
-        curPhase = phase
-        segPts = [pts[i]]
-      } else {
-        segPts.push(pts[i])
-      }
-    }
-    flushSeg(null, true)   // 最后一段显示方向箭头
-
-    // 起终点端点标记
-    ;[pts[0], pts[pts.length - 1]].forEach(([lng, lat], idx) => {
-      const dot = new AMap.CircleMarker({
-        center: [lng, lat], radius: idx === 0 ? 5 : 6,
-        strokeColor: idx === 0 ? '#10b981' : r.color, strokeWeight: 2,
-        fillColor: idx === 0 ? '#10b981' : r.color, fillOpacity: 0.95, zIndex: 15,
-      })
-      map.add(dot); routeLines2D.push(dot)
+    // 起终点标记（与态势大屏一致：绿色起点 / 红色终点）
+    const startM = new AMap.Marker({
+      position: path[0],
+      content: '<div style="width:14px;height:14px;background:#10b981;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7), zIndex: 110,
     })
+    const endM = new AMap.Marker({
+      position: path[path.length - 1],
+      content: '<div style="width:14px;height:14px;background:#ef4444;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7), zIndex: 110,
+    })
+    map.add(startM); map.add(endM)
+    routeLines2D.push(startM, endM)
   })
 }
 
