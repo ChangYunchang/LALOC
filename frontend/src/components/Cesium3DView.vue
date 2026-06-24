@@ -1156,7 +1156,11 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
 
   // 第二步：异步避障重绘（仅在开启避障且有剖面时）
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
-  if (!hasProfile || opts.avoidBuildings === false) return
+  if (!hasProfile || opts.avoidBuildings === false) {
+    // 无避障，以原始路径作为最终路径上报
+    if (opts.onFinalPath) opts.onFinalPath(pathPoints, altitudeProfile)
+    return
+  }
 
   // 首选：客户端"贴地规划再平移高空"——用真实 OSM 建筑做精细栅格水平绕行
   if (opts.controlPts && opts.controlPts.length >= 2) {
@@ -1172,6 +1176,8 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
         if (!drawAlive()) return
         _drawPlanPathCore(planned.path, planned.altitude_profile, th)
         viewer.scene.requestRender()
+        // 客户端精细路径作为最终路径上报（含完整建筑避让）
+        if (opts.onFinalPath) opts.onFinalPath(planned.path, planned.altitude_profile)
         return
       }
     } catch { /* 规划失败 → 回退垂直防穿模 */ }
@@ -1190,7 +1196,12 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
     if (!drawAlive()) return
     _drawPlanPathCore(corrected, corrected, th)
     viewer.scene.requestRender()
-  } catch { /* 采样失败，保留初始绘制 */ }
+    // 垂直校正后的路径作为最终路径上报
+    if (opts.onFinalPath) opts.onFinalPath(corrected, corrected)
+  } catch {
+    // 采样失败，以原始路径上报
+    if (opts.onFinalPath) opts.onFinalPath(pathPoints, altitudeProfile)
+  }
 }
 
 function clearPlanPath() {

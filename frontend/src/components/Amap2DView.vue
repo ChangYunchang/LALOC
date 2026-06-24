@@ -535,7 +535,7 @@ const PLAN_PHASE_LABELS = {
   height_limit: '限高绕行', building: '建筑避让', no_fly: '禁飞区绕行',
 }
 
-function drawPlanPath(pathPoints, altitudeProfile) {
+function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   clearPlanPath()
   const map = mapStore.map
   if (!map || !AMap || !pathPoints?.length) return
@@ -625,6 +625,9 @@ function drawPlanPath(pathPoints, altitudeProfile) {
   if (planPathLines.length > 0) {
     map.setFitView(planPathLines.filter(l => l instanceof AMap.Polyline), false, [80, 80, 80, 80])
   }
+
+  // 2D 不做路径精细化，直接上报最终路径供保存使用
+  if (opts.onFinalPath) opts.onFinalPath(pathPoints, altitudeProfile)
 }
 
 function clearPlanPath() {

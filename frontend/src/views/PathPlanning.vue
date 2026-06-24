@@ -361,9 +361,9 @@ function confirmSaveRoute() {
     status: 'planned',
     total_distance: r.total_distance,
     estimated_time: r.estimated_time,
-    waypoints: r.path || [],
-    route_line: { type: 'LineString', coordinates: (r.path || []).map(p => [p.lng, p.lat]) },
-    altitude_profile: r.altitude_profile || [],
+    waypoints: lastPlanPath || r.path || [],
+    route_line: { type: 'LineString', coordinates: (lastPlanPath || r.path || []).map(p => [p.lng, p.lat]) },
+    altitude_profile: lastAltProfile || r.altitude_profile || [],
     created_at: new Date().toISOString(),
   }
   mapStore.addSavedRoute(route)
@@ -651,6 +651,13 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   const cruiseAlt = planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value
   const useBuildings = planningMode.value === 'points' ? avoidBuildings.value : false
 
+  // onFinalPath 由 drawPlanPath 在最终路径确定后回调，更新 lastPlanPath/lastAltProfile
+  // 2D：绘制完成即回调；3D avoidBuildings：客户端 A* 精细路径完成后回调
+  const onFinalPath = (path, profile) => {
+    lastPlanPath = path
+    lastAltProfile = profile
+  }
+
   if (mapRef.viewMode === '3D' && planningMode.value === 'points') {
     planProgress.value = 18
     planProgressLabel.value = '计算真实建筑绕行航线'
@@ -659,6 +666,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
       onProgress: (frac, label) => {
         planProgress.value = Math.round(18 + frac * 82)
         planProgressLabel.value = label || ''
@@ -671,6 +679,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
     })
     planProgress.value = null
   } else {
@@ -679,6 +688,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
     })
     planProgress.value = null
   }
