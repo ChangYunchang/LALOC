@@ -122,7 +122,8 @@ async function createViewer() {
     navigationHelpButton: false,
     infoBox: false,
     selectionIndicator: false,
-    requestRenderMode: false,
+    requestRenderMode: true,
+    maximumRenderTimeChange: Infinity,
   })
 
   viewer.cesiumWidget.creditContainer.style.display = 'none'
@@ -146,14 +147,6 @@ async function createViewer() {
       console.warn('OSM layer also failed:', e2.message)
     }
   }
-
-  setTimeout(() => {
-    if (viewer && !viewer.isDestroyed()) {
-      viewer.scene.requestRenderMode = true
-      viewer.scene.maximumRenderTimeChange = Infinity
-      console.log('Switched to on-demand rendering')
-    }
-  }, 5000)
 
   console.log('Viewer created, loading OSM Buildings...')
 
@@ -297,49 +290,14 @@ function clearRouteEntities() {
   routeEntities = {}
 }
 
-// Catmull-Rom 样条平滑航线
-// - 将折线段变为弧线，消除 45° 折角视觉
-// - 自动生成符合无人机物理的起降弧（sin 缓入缓出）
-// - 每段插值 SAMPLES 个点，密集采样为后续建筑高度检测提供基础
+// coords 已由 sampleRoutes.js 的 Catmull-Rom 插值到 ~90 点，直接转 Cartesian3
+// 不再做第二次样条插值，避免将点数从 90 膨胀到 ~1069，消除后续建筑采样的主要开销
 function generateSmoothCurvePositions(coords, altProfile) {
-  const SAMPLES = 12       // 每段采样点数
-  const CRUISE_ALT = 180   // 无 altProfile 时的巡航高度(m)
-  const n = coords.length
-  if (n < 2) return coords.map((c, i) =>
-    Cesium.Cartesian3.fromDegrees(c[0], c[1], altProfile?.[i]?.alt ?? CRUISE_ALT))
-
-  // 构建控制点：有 altProfile 直接用，无则生成正弦起降弧
-  const ctrlPts = coords.map((c, i) => {
-    let alt
-    if (altProfile && altProfile[i]?.alt != null) {
-      alt = altProfile[i].alt
-    } else {
-      const t = i / (n - 1)
-      if (t < 0.18) {
-        // 起飞段：sin 缓入，15m → 巡航高度
-        alt = 15 + (CRUISE_ALT - 15) * Math.sin((t / 0.18) * (Math.PI / 2))
-      } else if (t > 0.82) {
-        // 降落段：sin 缓出，巡航高度 → 15m
-        alt = 15 + (CRUISE_ALT - 15) * Math.sin(((1 - t) / 0.18) * (Math.PI / 2))
-      } else {
-        alt = CRUISE_ALT
-      }
-    }
+  const CRUISE_ALT = 180
+  return coords.map((c, i) => {
+    const alt = altProfile?.[i]?.alt ?? CRUISE_ALT
     return Cesium.Cartesian3.fromDegrees(c[0], c[1], Math.max(alt, 15))
   })
-
-  // Cesium 内置 Catmull-Rom 样条（经过所有控制点，切线自动计算）
-  const times = coords.map((_, i) => i)
-  const spline = new Cesium.CatmullRomSpline({ times, points: ctrlPts })
-
-  const result = []
-  for (let i = 0; i < n - 1; i++) {
-    for (let k = 0; k < SAMPLES; k++) {
-      result.push(spline.evaluate(i + k / SAMPLES))
-    }
-  }
-  result.push(ctrlPts[n - 1])
-  return result
 }
 
 // 将一组 Cartesian3 路径点（平滑曲线上的密集采样）整体抬升至建筑物和地形上方
@@ -505,22 +463,6 @@ function drawRoutes(routes) {
       droneEntity, startEntity, endEntity,
     }
     routeAnimState[route.id] = { curvedPositions, droneEntity, progress: 0, route }
-
-    // 5. 异步抬升后逐段更新 positions
-    liftCurvedPositions(curvedPositions).then(liftedPositions => {
-      if (!viewer || viewer.isDestroyed() || !routeEntities[route.id]) return
-      curvedPositions = liftedPositions
-      segMeta.forEach(({ entity, startSm, endSm }) => {
-        entity.polyline.positions = new Cesium.ConstantProperty(liftedPositions.slice(startSm, endSm + 1))
-      })
-      startEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[0])
-      endEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[liftedPositions.length - 1])
-      if (routeAnimState[route.id]) {
-        routeAnimState[route.id].curvedPositions = liftedPositions
-        droneEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[0])
-      }
-      viewer.scene.requestRender()
-    }).catch(() => {})
   })
 
   startGlobalLoop()
@@ -561,6 +503,9 @@ function startGlobalLoop() {
       Cesium.Cartesian3.lerp(curvedPositions[i], curvedPositions[j], frac, pos)
       droneEntity.position = pos
     })
+
+    // requestRenderMode: true 下位置变更不会自动重绘，需手动触发一帧
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender()
 
     globalRafId = requestAnimationFrame(tick)
   }
