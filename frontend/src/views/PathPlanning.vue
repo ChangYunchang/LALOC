@@ -260,30 +260,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch, computed, onMounted, nextTick } from 'vue'
+import { ref, reactive, watch, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { planPath } from '@/api/pathfinding'
 import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
 import { useMapStore } from '@/stores/map'
 import { generateBoundaryPatrol, generateLawnmowerPatrol } from '@/utils/patrolRouteGenerator'
-import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
-
 const mapStore = useMapStore()
 const mapContainerRef = ref(null)
-
-// 地图就绪后绘制示例航线静态背景（相位着色、无动画）
-// 用 mapStore.map watcher 代替 setTimeout，避免 AMap 未初始化完就调用
-onMounted(() => {
-  if (mapStore.map) {
-    nextTick(() => mapContainerRef.value?.drawBackgroundRoutes(SAMPLE_ROUTES))
-  }
-})
-watch(() => mapStore.map, (newMap) => {
-  if (newMap && mapContainerRef.value) {
-    mapContainerRef.value.drawBackgroundRoutes(SAMPLE_ROUTES)
-  }
-})
 
 // ── 规划模式（顶层） ──────────────────────────
 const planningMode = ref('points')  // 'points' | 'patrol'
