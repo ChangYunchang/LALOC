@@ -380,7 +380,7 @@ function drawRoutes(routes) {
   clearRouteEntities()
   Object.keys(routeAnimState).forEach((k) => delete routeAnimState[k])
 
-  const SAMPLES = 12  // 与 generateSmoothCurvePositions 保持一致
+  const SAMPLES = 1  // generateSmoothCurvePositions 逐点映射，无中间插值
   const droneNormalCanvas = makeDroneCanvas('#f59e0b')
   const droneHighlightCanvas = makeDroneCanvas('#10b981')
 
