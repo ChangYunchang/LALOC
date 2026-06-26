@@ -32,6 +32,8 @@ def plan_path(request: PathPlanRequest, db: Session = Depends(get_db)):
             cruise_alt=request.cruise_alt or 100.0,
             safety_margin=request.safety_margin or 50.0,
             avoid_buildings=request.avoid_buildings if request.avoid_buildings is not None else True,
+            avoid_no_fly=request.avoid_no_fly if request.avoid_no_fly is not None else True,
+            avoid_height_limit=request.avoid_height_limit if request.avoid_height_limit is not None else True,
             consider_weather=request.consider_weather,
         )
 

@@ -136,12 +136,14 @@ def build_grid_from_db(
     min_lat: float = 22.8, max_lat: float = 23.4,
     cell_size_meters: float = 50,
     include_buildings: bool = False,  # 默认关闭—45k建筑建网格太慢，改用高度剖面检查
+    avoid_no_fly: bool = True,
+    avoid_height_limit: bool = True,
 ) -> GridMap:
     """从数据库中的禁飞区/限高区/建筑物构建网格地图"""
     grid = GridMap(min_lng, max_lng, min_lat, max_lat, cell_size_meters)
 
     # ── 1. 禁飞区 → 完全阻塞 ─────────────────
-    no_fly_zones = db.query(NoFlyZone).all()
+    no_fly_zones = db.query(NoFlyZone).all() if avoid_no_fly else []
     for zone in no_fly_zones:
         # 获取禁飞区的几何边界
         result = db.execute(
@@ -191,7 +193,7 @@ def build_grid_from_db(
         grid.blocked.update(buffer_cells)
 
     # 查询限高区并记录限高信息
-    height_limit_zones = db.query(HeightLimitZone).all()
+    height_limit_zones = db.query(HeightLimitZone).all() if avoid_height_limit else []
     for zone in height_limit_zones:
         result = db.execute(
             text("""
@@ -398,6 +400,24 @@ def _move_cost(grid: GridMap, c1: GridCell, c2: GridCell) -> float:
     return base
 
 
+def _nearest_free_cell(grid: GridMap, cell: GridCell) -> GridCell:
+    """
+    若格点落在阻塞区（禁飞区安全缓冲扩展到边界格时可能出现），
+    向外逐圈搜索最近的可通行格并返回，避免起/终点被阻塞时直接放弃搜索。
+    """
+    if not grid.is_blocked(cell):
+        return cell
+    for radius in range(1, 20):
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
+                if max(abs(dr), abs(dc)) != radius:
+                    continue
+                nc = GridCell(cell.row + dr, cell.col + dc)
+                if grid.is_valid(nc) and not grid.is_blocked(nc):
+                    return nc
+    return cell  # 极端情况：搜索范围内无空格，原样返回（A* 本身会失败而非崩溃）
+
+
 def astar_search(
     grid: GridMap,
     start_lng: float, start_lat: float,
@@ -416,6 +436,10 @@ def astar_search(
     start_cell = grid.lnglat_to_cell(start_lng, start_lat)
     end_cell = grid.lnglat_to_cell(end_lng, end_lat)
 
+    # 安全缓冲扩展可能把紧邻禁飞区边界的起/终点格纳入阻塞集；
+    # 就近修正到可通行格，确保规划仍能绕区进行，而非退化为直线穿越。
+    start_cell = _nearest_free_cell(grid, start_cell)
+    end_cell   = _nearest_free_cell(grid, end_cell)
     if grid.is_blocked(start_cell) or grid.is_blocked(end_cell):
         return None
 
@@ -645,6 +669,8 @@ def plan_path(
     cruise_alt: float = 100.0,
     safety_margin: float = 50.0,
     avoid_buildings: bool = True,
+    avoid_no_fly: bool = True,
+    avoid_height_limit: bool = True,
     consider_weather: bool = True,
     include_buildings_in_grid: bool = False,
 ) -> dict:
@@ -676,7 +702,10 @@ def plan_path(
     max_lat = max(all_lats) + buffer
 
     # 构建网格地图
-    grid = build_grid_from_db(db, min_lng, max_lng, min_lat, max_lat, cell_size_meters)
+    grid = build_grid_from_db(
+        db, min_lng, max_lng, min_lat, max_lat, cell_size_meters,
+        avoid_no_fly=avoid_no_fly, avoid_height_limit=avoid_height_limit,
+    )
 
     # 分段规划路径
     all_points = [(start_lng, start_lat)]

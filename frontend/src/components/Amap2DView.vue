@@ -9,6 +9,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { useMapStore } from '@/stores/map'
 import { useZoneStore } from '@/stores/zones'
+import { wgs2gcj, gcj2wgs } from '@/utils/coordConvert'
 
 const mapRef = ref(null)
 const mapStore = useMapStore()
@@ -184,7 +185,12 @@ function drawRoutes(routes) {
   routes.forEach((route) => {
     if (!route.route_line?.coordinates) return
 
-    const path = route.route_line.coordinates.map((c) => new AMap.LngLat(c[0], c[1]))
+    // crs='wgs84' 的航线（规划页面保存）需转 GCJ-02；样例/API 航线默认已是 GCJ-02
+    const toMapCoord = route.crs === 'wgs84'
+      ? (c) => { const g = wgs2gcj(c[0], c[1]); return new AMap.LngLat(g.lng, g.lat) }
+      : (c) => new AMap.LngLat(c[0], c[1])
+
+    const path = route.route_line.coordinates.map(toMapCoord)
     const altProfile = route.altitude_profile
     const polylines = []
 
@@ -540,12 +546,16 @@ function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   const map = mapStore.map
   if (!map || !AMap || !pathPoints?.length) return
 
+  // 路径点为 WGS-84，转 GCJ-02 供 AMap 渲染
+  const toGcj = (p) => { const g = wgs2gcj(p.lng, p.lat); return { ...p, lng: g.lng, lat: g.lat } }
+  const gcjPoints = pathPoints.map(toGcj)
+
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
 
   if (!hasProfile) {
     // fallback: 单色折线
     const line = new AMap.Polyline({
-      path: pathPoints.map(p => [p.lng, p.lat]),
+      path: gcjPoints.map(p => [p.lng, p.lat]),
       strokeColor: '#3b82f6', strokeWeight: 5, strokeOpacity: 0.9,
       showDir: true, lineJoin: 'round', lineCap: 'round', zIndex: 100,
     })
@@ -564,8 +574,8 @@ function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
       const endIdx   = boundaries[b + 1]
       const phase    = altitudeProfile[startIdx].phase
       const color    = PLAN_PHASE_COLORS[phase] || '#3b82f6'
-      // 首尾段各自包含端点，确保段落首尾衔接
-      const segPoints = pathPoints.slice(startIdx, endIdx + 1).map(p => [p.lng, p.lat])
+      // 首尾段各自包含端点，确保段落首尾衔接（使用 GCJ-02 坐标）
+      const segPoints = gcjPoints.slice(startIdx, endIdx + 1).map(p => [p.lng, p.lat])
       if (segPoints.length < 2) continue
 
       // 规避段（建筑/禁飞区）：宽光晕垫底 + 加粗虚线，醒目区别于巡航段
@@ -599,7 +609,7 @@ function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
     // 在相位切换点添加高度标注
     const phaseChanges = boundaries.slice(1, -1)  // 去掉首尾
     for (const idx of phaseChanges) {
-      const p = pathPoints[idx]
+      const p = gcjPoints[idx]
       const alt = altitudeProfile[idx]?.alt
       if (!alt) continue
       const label = new AMap.Text({
@@ -644,7 +654,11 @@ function addClickHandler(callback) {
   if (!map) return
   clickHandler = callback
   map.on('click', (e) => {
-    if (clickHandler) clickHandler({ lng: e.lnglat.getLng(), lat: e.lnglat.getLat() })
+    if (clickHandler) {
+      // AMap 返回 GCJ-02，转换为 WGS-84 后透出，保持系统内部坐标一致
+      const wgs = gcj2wgs(e.lnglat.getLng(), e.lnglat.getLat())
+      clickHandler({ lng: wgs.lng, lat: wgs.lat })
+    }
   })
 }
 
@@ -659,8 +673,10 @@ function removeClickHandler() {
 function addMarker(lng, lat, color) {
   const map = mapStore.map
   if (!map || !AMap) return null
+  // 接收 WGS-84，转 GCJ-02 后交给 AMap
+  const gcj = wgs2gcj(lng, lat)
   const marker = new AMap.Marker({
-    position: new AMap.LngLat(lng, lat),
+    position: new AMap.LngLat(gcj.lng, gcj.lat),
     content: `<div style="width:12px;height:12px;background:${color};border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.2);"></div>`,
     offset: new AMap.Pixel(-6, -6),
     zIndex: 130,

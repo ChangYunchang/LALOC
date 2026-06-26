@@ -359,6 +359,7 @@ function confirmSaveRoute() {
     responsible_person: saveForm.person,
     notes: saveForm.notes,
     status: 'planned',
+    crs: 'wgs84',  // 系统内部统一 WGS-84，2D 展示时自动转 GCJ-02
     total_distance: r.total_distance,
     estimated_time: r.estimated_time,
     waypoints: lastPlanPath || r.path || [],
