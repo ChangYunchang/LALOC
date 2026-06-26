@@ -1,12 +1,9 @@
 <!--
   应急航路规划
   场景：某架无人机在执飞途中电量不足/设备故障，需要立即规划一条
-        就近降落至充电站的应急路线。
-  操作流：
-    ① 点击某架无人机的"触发告警"按钮（或系统自动检测低电量）
-    ② 地图显示该无人机位置、续航圆圈、附近充电站距离排序
-    ③ 选择目标充电站（默认推荐最近且在续航内的）
-    ④ 一键生成应急路线，在地图上显示红色虚线路径
+        就近降落至充电站/维修站的应急路线。
+  路线渲染效果与常规路径规划保持一致：
+    爬升=绿色 / 巡航=蓝色 / 下降=橙色，逐段着色折线 + 方向箭头。
 -->
 <template>
   <div class="emergency-page">
@@ -20,10 +17,13 @@
         </div>
       </div>
 
-      <!-- 告警原因选择 -->
+      <!-- 告警原因筛选 -->
       <div class="section">
-        <div class="sect-label">告警原因</div>
-        <el-select v-model="alertReason" size="small" style="width:100%">
+        <div class="sect-label">
+          告警原因筛选
+          <span class="filter-count">{{ filteredDrones.length }}/{{ DRONES.length }}</span>
+        </div>
+        <el-select v-model="reasonFilter" size="small" style="width:100%">
           <el-option v-for="r in ALERT_REASONS" :key="r.value" :label="r.label" :value="r.value" />
         </el-select>
       </div>
@@ -32,11 +32,11 @@
       <div class="section">
         <div class="sect-label">
           飞行中无人机
-          <span class="count-badge">{{ DRONES.length }}</span>
+          <span class="count-badge">{{ filteredDrones.length }}</span>
           <span class="hint-text">点击触发告警</span>
         </div>
         <div class="drone-list">
-          <div v-for="d in DRONES" :key="d.id"
+          <div v-for="d in filteredDrones" :key="d.id"
             class="drone-card"
             :class="{ 'is-alert': alertDroneId === d.id, 'low-batt': d.battery < 30 }"
             @click="triggerAlert(d.id)">
@@ -48,12 +48,13 @@
             <div class="drone-row2">
               <span class="drone-region">📍 {{ d.region }}</span>
               <el-tag v-if="alertDroneId === d.id" type="danger" size="small" effect="dark">⚠ 告警中</el-tag>
-              <el-tag v-else-if="d.battery < 25" type="warning" size="small">低电量</el-tag>
+              <el-tag v-else :type="reasonTagType(d.alertReason)" size="small">{{ ALERT_REASON_LABELS[d.alertReason] }}</el-tag>
             </div>
             <div class="batt-bar-bg">
               <div class="batt-bar-fill" :style="{ width: d.battery+'%', background: battColor(d.battery) }"></div>
             </div>
           </div>
+          <div v-if="filteredDrones.length === 0" class="empty-filter">暂无此类告警无人机</div>
         </div>
       </div>
 
@@ -80,9 +81,9 @@
           </div>
         </div>
 
-        <!-- 就近充电站列表 -->
+        <!-- 就近站点列表 -->
         <div class="section">
-          <div class="sect-label">就近充电站（按距离排序）</div>
+          <div class="sect-label">就近站点（按距离排序）</div>
           <div class="station-list">
             <div v-for="(s, i) in sortedStations" :key="s.id"
               class="station-item"
@@ -94,9 +95,13 @@
               @click="s.inRange && !planning && selectStation(s.id)">
               <span class="stn-rank">{{ i+1 }}</span>
               <div class="stn-info">
-                <div class="stn-name">{{ s.name }}</div>
+                <div class="stn-name">
+                  <span class="stn-type-icon">{{ s.type === 'repair' ? '🔧' : '⚡' }}</span>
+                  {{ s.name }}
+                </div>
                 <div class="stn-meta">
-                  {{ formatDist(s.distance) }} &nbsp;·&nbsp; 空位 {{ s.available }}/{{ s.capacity }}
+                  {{ formatDist(s.distance) }} &nbsp;·&nbsp;
+                  {{ s.type === 'repair' ? '维修位' : '空位' }} {{ s.available }}/{{ s.capacity }}
                 </div>
               </div>
               <div class="stn-safety" :class="`safety-${s.safetyKey}`">{{ s.safetyLabel }}</div>
@@ -118,10 +123,16 @@
       <div class="section result-box" v-if="emergencyResult">
         <div class="result-title">✅ 应急路线已生成</div>
         <div class="result-rows">
-          <div class="result-row"><span>目标充电站</span><strong>{{ emergencyResult.stationName }}</strong></div>
+          <div class="result-row"><span>目标站点</span><strong>{{ emergencyResult.stationName }}</strong></div>
           <div class="result-row"><span>飞行距离</span><strong>{{ formatDist(emergencyResult.distance) }}</strong></div>
           <div class="result-row"><span>预计到达</span><strong>{{ emergencyResult.eta }}分钟</strong></div>
           <div class="result-row"><span>航点数量</span><strong>{{ emergencyResult.waypoints.length }} 个</strong></div>
+        </div>
+        <!-- 相位分段说明 -->
+        <div class="phase-legend-row">
+          <span class="phase-pill" style="background:#22c55e20;color:#16a34a;border-color:#86efac">▲ 爬升</span>
+          <span class="phase-pill" style="background:#3b82f620;color:#1d4ed8;border-color:#93c5fd">→ 巡航</span>
+          <span class="phase-pill" style="background:#f59e0b20;color:#b45309;border-color:#fcd34d">▼ 下降</span>
         </div>
         <div class="batt-assess" :class="`assess-${emergencyResult.batteryAssess}`">
           {{ emergencyResult.batteryAssessText }}
@@ -150,9 +161,13 @@
 
       <!-- 图例 -->
       <div class="map-legend">
-        <div class="leg-item"><span class="leg-icon" style="color:#f59e0b">⚡</span>充电站</div>
+        <div class="leg-title">应急路线图例</div>
+        <div class="leg-item"><span class="leg-line" style="background:#22c55e"></span>爬升阶段</div>
+        <div class="leg-item"><span class="leg-line" style="background:#3b82f6"></span>巡航阶段</div>
+        <div class="leg-item"><span class="leg-line" style="background:#f59e0b"></span>下降落地</div>
+        <div class="leg-item"><span class="leg-icon">⚡</span>充电站</div>
+        <div class="leg-item"><span class="leg-icon">🔧</span>维修站</div>
         <div class="leg-item"><span class="leg-icon">🚁</span>无人机</div>
-        <div class="leg-item"><span class="leg-line red-dash"></span>应急路线</div>
         <div class="leg-item"><span class="leg-line gray-line"></span>原始航线</div>
         <div class="leg-item"><span class="leg-circle"></span>续航范围</div>
       </div>
@@ -182,50 +197,84 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { ElMessage } from 'element-plus'
+import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 // ── 常量数据 ──────────────────────────────────────────
 const ALERT_REASONS = [
-  { value: 'low_battery', label: '⚡ 电量严重不足' },
+  { value: 'all',          label: '全部告警' },
+  { value: 'low_battery',  label: '⚡ 电量严重不足' },
   { value: 'device_fault', label: '🔧 设备故障迫降' },
-  { value: 'comm_loss',   label: '📡 通信失联备降' },
-  { value: 'weather',     label: '🌩 极端天气绕避' },
-  { value: 'nfz_expand',  label: '🚫 临时禁区扩展' },
+  { value: 'comm_loss',    label: '📡 通信失联备降' },
 ]
 
-// 广州地区无人机充电站（真实地名定位）
+const ALERT_REASON_LABELS = {
+  low_battery:  '⚡ 电量不足',
+  device_fault: '🔧 设备故障',
+  comm_loss:    '📡 通信失联',
+}
+
+// 充电/维修站 — 均位于示例航线的关键节点附近
 const CHARGING_STATIONS = [
-  { id: 1, name: '天河智慧充电站', lng: 113.3320, lat: 23.1400, available: 5, capacity: 8 },
-  { id: 2, name: '海珠东充电站',   lng: 113.3450, lat: 23.0870, available: 3, capacity: 6 },
-  { id: 3, name: '番禺南充电站',   lng: 113.2820, lat: 23.0380, available: 7, capacity: 10 },
-  { id: 4, name: '黄埔港区充电站', lng: 113.4150, lat: 23.1080, available: 6, capacity: 8 },
-  { id: 5, name: '荔湾西关充电站', lng: 113.2530, lat: 23.1240, available: 2, capacity: 5 },
-  { id: 6, name: '越秀中心充电站', lng: 113.2820, lat: 23.1330, available: 4, capacity: 6 },
+  // 天河枢纽：航线 1/2/3/5/8/9 均经过 [113.3245,23.1201]，站点略偏东北
+  { id: 1, name: '天河枢纽充电站', lng: 113.3260, lat: 23.1218, available: 5, capacity: 8,  type: 'charge' },
+  // 白云交叉：航线 1/3/5/6/7 经过 [113.3100,23.1050]，站点略偏西南
+  { id: 2, name: '白云路口充电站', lng: 113.3085, lat: 23.1038, available: 3, capacity: 6,  type: 'charge' },
+  // 番禺起点：航线 1/9 起点 [113.2671,23.0900]，旁边设维修站
+  { id: 3, name: '番禺起点维修站', lng: 113.2655, lat: 23.0885, available: 7, capacity: 10, type: 'repair' },
+  // 黄埔西侧：航线 3/4 经过 [113.3580,23.1050]，站点略偏东
+  { id: 4, name: '黄埔西侧充电站', lng: 113.3600, lat: 23.1062, available: 6, capacity: 8,  type: 'charge' },
+  // 荔湾起点：航线 5/7 起点/经点 [113.2671,23.1380]，站点略偏西
+  { id: 5, name: '荔湾起点充电站', lng: 113.2650, lat: 23.1395, available: 2, capacity: 5,  type: 'charge' },
+  // 越秀南：航线 6/9 起点 [113.3100,23.0750]，设维修站
+  { id: 6, name: '越秀南维修站',   lng: 113.3115, lat: 23.0735, available: 4, capacity: 6,  type: 'repair' },
 ]
 
-// 飞行中的无人机（位置在各自航线中途）
+// 飞行中无人机 — routeCoords 直接取 SAMPLE_ROUTES 的 Catmull-Rom 插值点，保证与态势大屏一致
 const DRONES = [
-  { id: 1, name: 'GZ-A001', battery: 18, routeName: '天河→番禺干线', region: '天河南路上空',
-    position: { lng: 113.3100, lat: 23.0870 },
-    routeCoords: [[113.3245,23.1201],[113.3100,23.0870],[113.2994,23.0500]] },
-  { id: 2, name: 'GZ-A002', battery: 63, routeName: '白云→荔湾横线', region: '白云中路上空',
-    position: { lng: 113.2800, lat: 23.1420 },
-    routeCoords: [[113.2994,23.1540],[113.2800,23.1420],[113.2500,23.1050]] },
-  { id: 3, name: 'GZ-B001', battery: 31, routeName: '黄埔→天河东线', region: '黄埔大道上空',
-    position: { lng: 113.3850, lat: 23.1180 },
-    routeCoords: [[113.4500,23.1100],[113.3850,23.1180],[113.3400,23.1201]] },
-  { id: 4, name: 'GZ-B002', battery: 47, routeName: '番禺物流专线', region: '番禺大桥上空',
-    position: { lng: 113.2994, lat: 23.0650 },
-    routeCoords: [[113.3100,23.0750],[113.2994,23.0650],[113.2850,23.0500]] },
-  { id: 5, name: 'GZ-C001', battery: 76, routeName: '越秀→南沙纵线', region: '中山大道上空',
+  {
+    id: 1, name: 'GZ-A001', battery: 18, alertReason: 'low_battery',
+    routeName: '番禺→天河干线', region: '天河南路上空',
+    position: { lng: 113.3100, lat: 23.1050 },
+    routeCoords: SAMPLE_ROUTES[0].pts,
+  },
+  {
+    id: 2, name: 'GZ-A002', battery: 63, alertReason: 'comm_loss',
+    routeName: '白云→天河横线', region: '白云中路上空',
+    position: { lng: 113.3100, lat: 23.1380 },
+    routeCoords: SAMPLE_ROUTES[1].pts,
+  },
+  {
+    id: 3, name: 'GZ-B001', battery: 31, alertReason: 'device_fault',
+    routeName: '黄埔→白云线', region: '黄埔大道上空',
+    position: { lng: 113.3400, lat: 23.1201 },
+    routeCoords: SAMPLE_ROUTES[2].pts,
+  },
+  {
+    id: 4, name: 'GZ-B002', battery: 47, alertReason: 'device_fault',
+    routeName: '番禺→天河南线', region: '番禺大桥上空',
+    position: { lng: 113.3100, lat: 23.0900 },
+    routeCoords: SAMPLE_ROUTES[8].pts,
+  },
+  {
+    id: 5, name: 'GZ-C001', battery: 76, alertReason: 'comm_loss',
+    routeName: '越秀纵向线', region: '越秀中山大道上空',
     position: { lng: 113.3100, lat: 23.1200 },
-    routeCoords: [[113.3100,23.1380],[113.3100,23.1200],[113.3100,23.0500]] },
+    routeCoords: SAMPLE_ROUTES[5].pts,
+  },
 ]
 
 const EST_RANGE_PER_PCT = 140  // 每 1% 电量约可飞 140m（保守估计，留安全余量）
 const DRONE_SPEED_MS = 15
 
+// 应急路线相位颜色（与 Amap2DView PLAN_PHASE_COLORS 一致）
+const PHASE_COLORS = {
+  ascent:  '#22c55e',
+  cruise:  '#3b82f6',
+  descent: '#f59e0b',
+}
+
 // ── 响应式状态 ────────────────────────────────────────
-const alertReason = ref('low_battery')
+const reasonFilter = ref('all')       // 列表筛选器（不影响已触发告警的原因）
 const alertDroneId = ref(null)
 const selectedStationId = ref(null)
 const emergencyResult = ref(null)
@@ -237,7 +286,10 @@ let stationMarkers = [], droneOverlays = [], alertOverlays = [], routeOverlays =
 
 // ── 计算属性 ──────────────────────────────────────────
 const alertDrone = computed(() => DRONES.find(d => d.id === alertDroneId.value) || null)
-const currentReasonLabel = computed(() => ALERT_REASONS.find(r => r.value === alertReason.value)?.label || '')
+const currentReasonLabel = computed(() => ALERT_REASON_LABELS[alertDrone.value?.alertReason] || '')
+const filteredDrones = computed(() =>
+  reasonFilter.value === 'all' ? DRONES : DRONES.filter(d => d.alertReason === reasonFilter.value)
+)
 const estRange = computed(() => alertDrone.value ? alertDrone.value.battery * EST_RANGE_PER_PCT : 0)
 const estMinutes = computed(() => {
   if (!alertDrone.value) return 0
@@ -283,6 +335,55 @@ function battClass(p) {
   if (p <= 35) return 'batt-yellow'
   return 'batt-green'
 }
+function reasonTagType(reason) {
+  if (reason === 'low_battery')  return 'warning'
+  if (reason === 'device_fault') return 'danger'
+  if (reason === 'comm_loss')    return 'info'
+  return 'info'
+}
+
+// ── 路径规划算法 ──────────────────────────────────────
+// 与常规路径规划相同思路：插值生成路径点，计算高度剖面（爬升/巡航/下降）
+function buildEmergencyPath(from, to, cruiseAlt = 120) {
+  const STEPS = 24
+  const ASCENT_R  = 0.15  // 前 15% 爬升
+  const DESCENT_R = 0.15  // 后 15% 下降
+
+  // 在起终点之间加一个略偏的中间控制点，避免纯直线
+  const dx = to.lng - from.lng
+  const dy = to.lat - from.lat
+  // 沿垂直方向偏移 25%（自然弧线感）
+  const perpLng = -dy * 0.25
+  const perpLat =  dx * 0.25
+  const midLng = (from.lng + to.lng) / 2 + perpLng
+  const midLat = (from.lat + to.lat) / 2 + perpLat
+
+  // 二次贝塞尔插值（P0→P1→P2）
+  const pts = []
+  for (let i = 0; i < STEPS; i++) {
+    const t = i / (STEPS - 1)
+    const mt = 1 - t
+    const lng = mt * mt * from.lng + 2 * mt * t * midLng + t * t * to.lng
+    const lat = mt * mt * from.lat + 2 * mt * t * midLat + t * t * to.lat
+    pts.push({ lng: parseFloat(lng.toFixed(6)), lat: parseFloat(lat.toFixed(6)) })
+  }
+
+  // 高度剖面（与 sampleRoutes.js buildRoute 同算法）
+  const altitude_profile = pts.map((_, i) => {
+    const t = i / (STEPS - 1)
+    if (t <= ASCENT_R) {
+      const a = t / ASCENT_R
+      return { index: i, alt: Math.round(20 + (cruiseAlt - 20) * Math.sin(a * Math.PI / 2)), phase: 'ascent' }
+    }
+    if (t >= 1 - DESCENT_R) {
+      const a = (1 - t) / DESCENT_R
+      return { index: i, alt: Math.round(20 + (cruiseAlt - 20) * Math.sin(a * Math.PI / 2)), phase: 'descent' }
+    }
+    return { index: i, alt: cruiseAlt, phase: 'cruise' }
+  })
+
+  return { pts, altitude_profile }
+}
 
 // ── AMap 初始化 ───────────────────────────────────────
 async function initMap() {
@@ -301,7 +402,7 @@ async function initMap() {
   } catch (e) { console.error('AMap init failed:', e) }
 }
 
-// ── 渲染充电站（始终可见） ────────────────────────────
+// ── 渲染充电/维修站（始终可见） ──────────────────────
 function renderStations() {
   stationMarkers.forEach(m => { try { map.remove(m) } catch {} })
   stationMarkers = []
@@ -310,13 +411,22 @@ function renderStations() {
     const isInRange = alertDrone.value
       ? haversine(alertDrone.value.position, { lat: s.lat, lng: s.lng }) <= estRange.value
       : true
-    const bg = isSelected ? '#16a34a' : isInRange ? '#f59e0b' : '#94a3b8'
+    const bg = isSelected ? '#16a34a' : isInRange ? (s.type === 'repair' ? '#7c3aed' : '#f59e0b') : '#94a3b8'
+    const icon = s.type === 'repair' ? '🔧' : '⚡'
+    const label = s.type === 'repair' ? '维修站' : '充电站'
+    // 选中时显示完整信息（含容量），其余只显示图标+名称，避免标注过宽导致重叠
+    const contentHtml = isSelected
+      ? `<div style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:nowrap;border:2px solid #fff;text-align:center">
+          ${icon} ${s.name}<br><span style="font-size:10px;opacity:.85">${label} · 空位 ${s.available}/${s.capacity}</span>
+        </div>`
+      : `<div style="background:${bg};color:#fff;padding:3px 7px;border-radius:5px;font-size:11px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.2);white-space:nowrap;border:2px solid #fff">
+          ${icon} ${s.name}
+        </div>`
     const m = new AMap.Marker({
       position: [s.lng, s.lat],
-      content: `<div style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:nowrap;border:2px solid #fff;text-align:center">
-        ⚡ ${s.name}<br><span style="font-size:10px;opacity:.85">空位 ${s.available}/${s.capacity}</span>
-      </div>`,
-      offset: new AMap.Pixel(-50, -30),
+      content: contentHtml,
+      // 充电/维修站标注锚点在标注正下方（向上偏移），与无人机标注（向下偏移）方向相反，避免重叠
+      offset: new AMap.Pixel(-50, -(isSelected ? 48 : 30)),
       zIndex: isSelected ? 300 : 150,
     })
     map.add(m)
@@ -330,7 +440,6 @@ function renderDroneRoutes() {
   droneOverlays = []
   DRONES.forEach(d => {
     const isAlert = alertDroneId.value === d.id
-    // 原始航线（灰色）
     const routeLine = new AMap.Polyline({
       path: d.routeCoords.map(c => [c[0], c[1]]),
       strokeColor: isAlert ? '#475569' : '#94a3b8',
@@ -340,16 +449,16 @@ function renderDroneRoutes() {
     map.add(routeLine)
     droneOverlays.push(routeLine)
 
-    // 无人机当前位置标记
     const bg = isAlert ? '#dc2626' : battColor(d.battery)
     const icon = isAlert ? '🚨' : '🚁'
-    const cssClass = isAlert ? ' em-alert-marker' : ''
+    const cssClass = isAlert ? 'em-alert-marker' : ''
     const m = new AMap.Marker({
       position: [d.position.lng, d.position.lat],
-      content: `<div class="${cssClass.trim()}" style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:${isAlert?700:500};box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;border:2px solid #fff">
+      content: `<div class="${cssClass}" style="background:${bg};color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:${isAlert?700:500};box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;border:2px solid #fff">
         ${icon} ${d.name} 🔋${d.battery}%
       </div>`,
-      offset: new AMap.Pixel(-42, -16),
+      // 无人机标注锚点在标注正上方（向下偏移），充电站标注向上偏移，两类标注方向相反，位置接近时不互遮
+      offset: new AMap.Pixel(-42, 8),
       zIndex: isAlert ? 400 : 100,
     })
     map.add(m)
@@ -364,7 +473,6 @@ function renderAlertOverlays() {
   if (!alertDrone.value) return
 
   const d = alertDrone.value
-  // 续航圆圈（蓝色虚线）
   const circle = new AMap.Circle({
     center: [d.position.lng, d.position.lat],
     radius: estRange.value,
@@ -375,7 +483,6 @@ function renderAlertOverlays() {
   map.add(circle)
   alertOverlays.push(circle)
 
-  // 安全边界圆（75% 续航，绿色）
   const safeCircle = new AMap.Circle({
     center: [d.position.lng, d.position.lat],
     radius: estRange.value * 0.75,
@@ -386,7 +493,6 @@ function renderAlertOverlays() {
   map.add(safeCircle)
   alertOverlays.push(safeCircle)
 
-  // 标注"续航边界"文字
   const edgePt = new AMap.LngLat(d.position.lng + estRange.value / 111000, d.position.lat)
   const rangeLabel = new AMap.Text({
     position: edgePt,
@@ -400,81 +506,104 @@ function renderAlertOverlays() {
   map.setZoom(13)
 }
 
-// ── 绘制应急路线 ──────────────────────────────────────
-function drawEmergencyRoute(waypoints) {
+// ── 绘制应急路线（相位着色，与常规路径规划效果一致） ──
+function drawEmergencyRoute(pts, altProfile) {
   routeOverlays.forEach(o => { try { map.remove(o) } catch {} })
   routeOverlays = []
+  if (!pts?.length || !altProfile?.length) return
 
-  // 红色虚线应急路线
-  const line = new AMap.Polyline({
-    path: waypoints.map(w => [w.lng, w.lat]),
-    strokeColor: '#dc2626', strokeWeight: 3,
-    strokeStyle: 'dashed', strokeDasharray: [12, 6],
-    strokeOpacity: 0.9, lineJoin: 'round', lineCap: 'round',
-  })
-  map.add(line)
-  routeOverlays.push(line)
+  // 找相位切换边界
+  const boundaries = [0]
+  for (let i = 1; i < altProfile.length; i++) {
+    if (altProfile[i].phase !== altProfile[i - 1].phase) boundaries.push(i)
+  }
+  boundaries.push(altProfile.length - 1)
 
-  // 箭头方向折线（稍细）
+  // 逐段绘制相位着色折线
+  for (let b = 0; b < boundaries.length - 1; b++) {
+    const startIdx = boundaries[b]
+    const endIdx   = boundaries[b + 1]
+    const phase    = altProfile[startIdx].phase
+    const color    = PHASE_COLORS[phase] || '#3b82f6'
+    const segPts   = pts.slice(startIdx, endIdx + 1).map(p => [p.lng, p.lat])
+    if (segPts.length < 2) continue
+
+    const line = new AMap.Polyline({
+      path: segPts,
+      strokeColor: color,
+      strokeWeight: 4,
+      strokeOpacity: 0.92,
+      lineJoin: 'round', lineCap: 'round',
+      zIndex: 100,
+    })
+    map.add(line)
+    routeOverlays.push(line)
+  }
+
+  // 方向箭头（半透明叠在路线上）
   const arrowLine = new AMap.Polyline({
-    path: waypoints.map(w => [w.lng, w.lat]),
-    strokeColor: '#dc2626', strokeWeight: 1,
-    strokeOpacity: 0.3, showDir: true,
+    path: pts.map(p => [p.lng, p.lat]),
+    strokeColor: '#64748b', strokeWeight: 1,
+    strokeOpacity: 0.25, showDir: true, zIndex: 99,
   })
   map.add(arrowLine)
   routeOverlays.push(arrowLine)
 
-  // 起点标记（出发）
+  // 起点：在无人机位置正上方加"出发"小气泡，与无人机标记（在右下方）错开不重叠
+  const stn = selectedStation.value
   const startM = new AMap.Marker({
-    position: [waypoints[0].lng, waypoints[0].lat],
-    content: `<div style="background:#dc2626;color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(220,38,38,.5);border:2px solid #fff;white-space:nowrap">
-      📍 ${alertDrone.value?.name} 出发
+    position: [pts[0].lng, pts[0].lat],
+    content: `<div style="background:#7f1d1d;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;opacity:.92;white-space:nowrap">
+      🛫 出发
     </div>`,
-    offset: new AMap.Pixel(-48, -18),
-    zIndex: 500,
+    offset: new AMap.Pixel(-22, -52),   // 出发气泡在无人机标记正上方，不与其重叠
+    zIndex: 490,
   })
   map.add(startM)
   routeOverlays.push(startM)
 
-  // 终点标记（目标充电站，高亮绿色）
-  const endW = waypoints[waypoints.length - 1]
+  // 终点：在站点标记正下方加"到达"小气泡，与站点标记（在正上方）错开
+  const endP = pts[pts.length - 1]
+  const endIcon = stn?.type === 'repair' ? '🔧' : '⚡'
   const endM = new AMap.Marker({
-    position: [endW.lng, endW.lat],
-    content: `<div style="background:#16a34a;color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(22,163,74,.5);border:2px solid #fff;white-space:nowrap">
-      ⚡ ${selectedStation.value?.name}
+    position: [endP.lng, endP.lat],
+    content: `<div style="background:#14532d;color:#fff;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:600;opacity:.92;white-space:nowrap">
+      ${endIcon} 目标到达
     </div>`,
-    offset: new AMap.Pixel(-52, -20),
-    zIndex: 500,
+    offset: new AMap.Pixel(-36, 10),    // 到达气泡在站点标记正下方，不与其重叠
+    zIndex: 490,
   })
   map.add(endM)
   routeOverlays.push(endM)
 
-  // 中间航点
-  waypoints.slice(1, -1).forEach((w, i) => {
-    const m = new AMap.CircleMarker({
-      center: [w.lng, w.lat], radius: 5,
-      fillColor: '#f59e0b', fillOpacity: 0.9,
-      strokeColor: '#fff', strokeWeight: 1.5,
+  // 巡航段中间航点（蓝色小圆点）
+  pts.forEach((p, i) => {
+    if (i === 0 || i === pts.length - 1) return
+    if (altProfile[i]?.phase !== 'cruise') return
+    if (i % 4 !== 0) return  // 每 4 个点取 1 个，避免过密
+    const dot = new AMap.CircleMarker({
+      center: [p.lng, p.lat], radius: 4,
+      fillColor: '#3b82f6', fillOpacity: 0.85,
+      strokeColor: '#fff', strokeWeight: 1.5, zIndex: 110,
     })
-    map.add(m)
-    routeOverlays.push(m)
+    map.add(dot)
+    routeOverlays.push(dot)
   })
 
-  // 地图自适应显示整条路线
-  setTimeout(() => { try { map.setFitView([line], false, [80, 80, 80, 80]) } catch {} }, 100)
+  // 自适应视图
+  setTimeout(() => {
+    try { map.setFitView(routeOverlays.filter(o => o instanceof AMap.Polyline), false, [80, 80, 80, 80]) } catch {}
+  }, 100)
 }
 
 // ── 操作函数 ──────────────────────────────────────────
 function triggerAlert(droneId) {
-  if (alertDroneId.value === droneId) {
-    resetAll(); return
-  }
+  if (alertDroneId.value === droneId) { resetAll(); return }
   emergencyResult.value = null
   selectedStationId.value = null
   alertDroneId.value = droneId
   const d = DRONES.find(d => d.id === droneId)
-  if (d && d.battery < 30) alertReason.value = 'low_battery'
-  ElMessage({ type: 'warning', message: `${d?.name} 已触发告警：${ALERT_REASONS.find(r=>r.value===alertReason.value)?.label}` })
+  ElMessage({ type: 'warning', message: `${d?.name} 已触发告警：${ALERT_REASON_LABELS[d?.alertReason] || '未知原因'}` })
 }
 
 function selectStation(stationId) {
@@ -501,29 +630,19 @@ async function planRoute() {
   await new Promise(r => setTimeout(r, 600))
 
   const from = alertDrone.value.position
-  const to = { lng: selectedStation.value.lng, lat: selectedStation.value.lat }
+  const to   = { lng: selectedStation.value.lng, lat: selectedStation.value.lat }
   const dist = selectedStation.value.distance
 
-  // 生成绕行航点（轻微偏置模拟规避）
-  const mid1Lng = from.lng + (to.lng - from.lng) * 0.35 + 0.004
-  const mid1Lat = from.lat + (to.lat - from.lat) * 0.35
-  const mid2Lng = from.lng + (to.lng - from.lng) * 0.70 - 0.002
-  const mid2Lat = from.lat + (to.lat - from.lat) * 0.70 + 0.003
+  // 使用贝塞尔+高度剖面算法（与常规路径规划同思路）
+  const { pts, altitude_profile } = buildEmergencyPath(from, to)
 
-  const waypoints = [
-    { lng: from.lng, lat: from.lat, alt: 120, remark: `${alertDrone.value.name} 当前位置` },
-    { lng: mid1Lng, lat: mid1Lat, alt: 150, remark: '上升爬高·绕避节点1' },
-    { lng: mid2Lng, lat: mid2Lat, alt: 130, remark: '水平巡航·绕避节点2' },
-    { lng: to.lng, lat: to.lat, alt: 20, remark: `落地·${selectedStation.value.name}` },
-  ]
-
-  const eta = +(dist / DRONE_SPEED_MS / 60).toFixed(1)
-  const needed = dist / EST_RANGE_PER_PCT
-  const batt = alertDrone.value.battery
+  const eta      = +(dist / DRONE_SPEED_MS / 60).toFixed(1)
+  const needed   = dist / EST_RANGE_PER_PCT
+  const batt     = alertDrone.value.battery
   const assessKey = batt >= needed * 1.3 ? 'safe' : batt >= needed ? 'marginal' : 'insufficient'
   const assessText = {
-    safe: `✅ 电量充足（剩余 ${batt}%，需要约 ${needed.toFixed(0)}%）`,
-    marginal: `⚠️ 电量勉强（剩余 ${batt}%，接近需要量）`,
+    safe:         `✅ 电量充足（剩余 ${batt}%，需要约 ${needed.toFixed(0)}%）`,
+    marginal:     `⚠️ 电量勉强（剩余 ${batt}%，接近需要量）`,
     insufficient: `❌ 电量不足（剩余 ${batt}%，不足以到达）`,
   }[assessKey]
 
@@ -531,16 +650,21 @@ async function planRoute() {
     stationName: selectedStation.value.name,
     distance: dist,
     eta,
-    waypoints,
+    waypoints: pts.map((p, i) => ({
+      lng: p.lng, lat: p.lat,
+      alt: altitude_profile[i]?.alt ?? 120,
+      phase: altitude_profile[i]?.phase ?? 'cruise',
+    })),
     batteryAssess: assessKey,
     batteryAssessText: assessText,
   }
 
-  drawEmergencyRoute(waypoints)
-  renderDroneRoutes()
+  drawEmergencyRoute(pts, altitude_profile)
 
-  ElMessage({ type: assessKey === 'insufficient' ? 'warning' : 'success',
-    message: `应急路线已生成 → ${selectedStation.value.name}，预计 ${eta} 分钟` })
+  ElMessage({
+    type: assessKey === 'insufficient' ? 'warning' : 'success',
+    message: `应急路线已生成 → ${selectedStation.value.name}，预计 ${eta} 分钟`,
+  })
   planning.value = false
 }
 
@@ -615,7 +739,9 @@ onUnmounted(() => { map?.destroy() })
   letter-spacing: .6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
 }
 .count-badge { background: #2563eb; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 700; }
+.filter-count { font-size: 10px; color: #6b7280; font-weight: 400; letter-spacing: 0; margin-left: 2px; }
 .hint-text { font-size: 10px; color: #9ca3af; font-weight: 400; letter-spacing: 0; }
+.empty-filter { text-align: center; font-size: 12px; color: #9ca3af; padding: 14px 0; }
 
 /* Drone cards */
 .drone-list { display: flex; flex-direction: column; gap: 6px; }
@@ -659,7 +785,8 @@ onUnmounted(() => { map?.destroy() })
 .station-item.out-range { opacity: 0.5; cursor: not-allowed; }
 .stn-rank { width: 18px; height: 18px; background: #e5e7eb; border-radius: 50%; font-size: 10px; font-weight: 700; color: #6b7280; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .stn-info { flex: 1; min-width: 0; }
-.stn-name { font-size: 12px; font-weight: 600; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stn-name { font-size: 12px; font-weight: 600; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+.stn-type-icon { font-size: 13px; flex-shrink: 0; }
 .stn-meta { font-size: 10px; color: #9ca3af; margin-top: 1px; }
 .stn-safety { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
 .safety-safe     { color: #16a34a; }
@@ -695,6 +822,11 @@ onUnmounted(() => { map?.destroy() })
 .result-rows { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .result-row { display: flex; justify-content: space-between; font-size: 12px; color: #374151; }
 .result-row strong { color: #111827; }
+.phase-legend-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.phase-pill {
+  font-size: 10px; padding: 2px 8px; border-radius: 10px;
+  border: 1px solid; font-weight: 600;
+}
 .batt-assess { font-size: 11px; padding: 5px 8px; border-radius: 6px; line-height: 1.5; }
 .assess-safe         { background: #dcfce7; color: #15803d; }
 .assess-marginal     { background: #fef9c3; color: #854d0e; }
@@ -728,12 +860,11 @@ onUnmounted(() => { map?.destroy() })
   padding: 10px 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
   font-size: 11px; z-index: 100;
 }
+.leg-title { font-size: 10px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
 .leg-item { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; color: #6b7280; }
 .leg-item:last-child { margin-bottom: 0; }
 .leg-icon { font-size: 14px; }
-.leg-drone { font-size: 13px; }
 .leg-line { display: inline-block; width: 28px; height: 3px; border-radius: 2px; flex-shrink: 0; }
-.red-dash { background: repeating-linear-gradient(90deg, #dc2626 0 8px, transparent 8px 14px); }
 .gray-line { background: #94a3b8; }
 .leg-circle { display: inline-block; width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; border: 2px dashed #2563eb; background: rgba(37,99,235,0.05); }
 

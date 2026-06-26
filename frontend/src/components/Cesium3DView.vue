@@ -9,6 +9,10 @@ import { onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import { useMapStore } from '@/stores/map'
 import { useZoneStore } from '@/stores/zones'
 
+const props = defineProps({
+  showRoutes: { type: Boolean, default: true },
+})
+
 // 动态加载 Cesium — 仅在 3D 模式时加载，不阻塞页面
 let Cesium = null
 let cesiumStyleLoaded = false
@@ -122,38 +126,31 @@ async function createViewer() {
     navigationHelpButton: false,
     infoBox: false,
     selectionIndicator: false,
-    requestRenderMode: false,
+    requestRenderMode: true,
+    maximumRenderTimeChange: Infinity,
   })
 
   viewer.cesiumWidget.creditContainer.style.display = 'none'
 
-  // 优先使用高德卫星图（国内访问快），失败回退 OSM
+  // 使用 ESRI 卫星影像（WGS-84 对齐），与 OSM 白模坐标系一致，无偏移
+  // 注意：高德/百度卫星瓦片使用 GCJ-02，直接用于 Cesium 会导致白模与底图错位 ~300-500m
   try {
-    const amapImagery = new Cesium.UrlTemplateImageryProvider({
-      url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-      subdomains: ['1', '2', '3', '4'],
-      maximumLevel: 18,
+    const esriImagery = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      maximumLevel: 19,
     })
-    viewer.imageryLayers.addImageryProvider(amapImagery)
-    console.log('AMap satellite layer added')
+    viewer.imageryLayers.addImageryProvider(esriImagery)
+    console.log('ESRI World Imagery layer added (WGS-84 aligned)')
   } catch (e) {
-    console.warn('AMap layer failed, trying OSM:', e.message)
+    console.warn('ESRI layer failed, trying OSM:', e.message)
     try {
       viewer.imageryLayers.addImageryProvider(
-        Cesium.createOpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+        new Cesium.UrlTemplateImageryProvider({ url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maximumLevel: 19 })
       )
     } catch (e2) {
       console.warn('OSM layer also failed:', e2.message)
     }
   }
-
-  setTimeout(() => {
-    if (viewer && !viewer.isDestroyed()) {
-      viewer.scene.requestRenderMode = true
-      viewer.scene.maximumRenderTimeChange = Infinity
-      console.log('Switched to on-demand rendering')
-    }
-  }, 5000)
 
   console.log('Viewer created, loading OSM Buildings...')
 
@@ -208,11 +205,13 @@ async function createViewer() {
   mapStore.setCesiumViewer(viewer)
   renderZones()
 
-  const storedRoutes = mapStore.routeDataList
-  if (storedRoutes?.length) {
-    drawRoutes(storedRoutes)
-  } else if (lastRoutesData) {
-    drawRoutes(lastRoutesData)
+  if (props.showRoutes) {
+    const storedRoutes = mapStore.routeDataList
+    if (storedRoutes?.length) {
+      drawRoutes(storedRoutes)
+    } else if (lastRoutesData) {
+      drawRoutes(lastRoutesData)
+    }
   }
 
   setTimeout(() => {
@@ -297,49 +296,14 @@ function clearRouteEntities() {
   routeEntities = {}
 }
 
-// Catmull-Rom 样条平滑航线
-// - 将折线段变为弧线，消除 45° 折角视觉
-// - 自动生成符合无人机物理的起降弧（sin 缓入缓出）
-// - 每段插值 SAMPLES 个点，密集采样为后续建筑高度检测提供基础
+// coords 已由 sampleRoutes.js 的 Catmull-Rom 插值到 ~90 点，直接转 Cartesian3
+// 不再做第二次样条插值，避免将点数从 90 膨胀到 ~1069，消除后续建筑采样的主要开销
 function generateSmoothCurvePositions(coords, altProfile) {
-  const SAMPLES = 12       // 每段采样点数
-  const CRUISE_ALT = 180   // 无 altProfile 时的巡航高度(m)
-  const n = coords.length
-  if (n < 2) return coords.map((c, i) =>
-    Cesium.Cartesian3.fromDegrees(c[0], c[1], altProfile?.[i]?.alt ?? CRUISE_ALT))
-
-  // 构建控制点：有 altProfile 直接用，无则生成正弦起降弧
-  const ctrlPts = coords.map((c, i) => {
-    let alt
-    if (altProfile && altProfile[i]?.alt != null) {
-      alt = altProfile[i].alt
-    } else {
-      const t = i / (n - 1)
-      if (t < 0.18) {
-        // 起飞段：sin 缓入，15m → 巡航高度
-        alt = 15 + (CRUISE_ALT - 15) * Math.sin((t / 0.18) * (Math.PI / 2))
-      } else if (t > 0.82) {
-        // 降落段：sin 缓出，巡航高度 → 15m
-        alt = 15 + (CRUISE_ALT - 15) * Math.sin(((1 - t) / 0.18) * (Math.PI / 2))
-      } else {
-        alt = CRUISE_ALT
-      }
-    }
+  const CRUISE_ALT = 180
+  return coords.map((c, i) => {
+    const alt = altProfile?.[i]?.alt ?? CRUISE_ALT
     return Cesium.Cartesian3.fromDegrees(c[0], c[1], Math.max(alt, 15))
   })
-
-  // Cesium 内置 Catmull-Rom 样条（经过所有控制点，切线自动计算）
-  const times = coords.map((_, i) => i)
-  const spline = new Cesium.CatmullRomSpline({ times, points: ctrlPts })
-
-  const result = []
-  for (let i = 0; i < n - 1; i++) {
-    for (let k = 0; k < SAMPLES; k++) {
-      result.push(spline.evaluate(i + k / SAMPLES))
-    }
-  }
-  result.push(ctrlPts[n - 1])
-  return result
 }
 
 // 将一组 Cartesian3 路径点（平滑曲线上的密集采样）整体抬升至建筑物和地形上方
@@ -416,6 +380,7 @@ function drawRoutes(routes) {
   clearRouteEntities()
   Object.keys(routeAnimState).forEach((k) => delete routeAnimState[k])
 
+  const SAMPLES = 1  // generateSmoothCurvePositions 逐点映射，无中间插值
   const droneNormalCanvas = makeDroneCanvas('#f59e0b')
   const droneHighlightCanvas = makeDroneCanvas('#10b981')
 
@@ -424,6 +389,7 @@ function drawRoutes(routes) {
 
     const coords = route.route_line.coordinates
     const altProfile = route.altitude_profile
+    const n = coords.length
 
     // 1. Catmull-Rom 平滑曲线（含起降弧），密集采样点
     let curvedPositions = generateSmoothCurvePositions(coords, altProfile)
@@ -431,18 +397,39 @@ function drawRoutes(routes) {
     const makeDepthFail = (color) =>
       new Cesium.PolylineDashMaterialProperty({ color: color.withAlpha(0.4), dashLength: 10 })
 
-    // 2. 平滑折线实体
-    const polylineEntity = viewer.entities.add({
-      polyline: {
-        positions: curvedPositions,
-        width: 4,
-        material: COL.normal,
-        depthFailMaterial: makeDepthFail(COL.normal),
-        clampToGround: false,
-      },
-    })
+    // 2. 按 altProfile 相位边界拆分段，每段独立着色
+    //    原始点 i 对应平滑曲线索引 i * SAMPLES
+    const boundaries = [0]
+    for (let i = 1; i < n; i++) {
+      if ((altProfile?.[i]?.phase || 'cruise') !== (altProfile?.[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
 
-    // 3. 起终点标记（与曲线端点精确重合）
+    const segMeta = []  // { entity, startSmooth, endSmooth }
+    for (let b = 0; b < boundaries.length; b++) {
+      const startOrig = boundaries[b]
+      const endOrig   = b < boundaries.length - 1 ? boundaries[b + 1] : n - 1
+      const phase     = altProfile?.[startOrig]?.phase || 'cruise'
+      const color     = COL.phase[phase] || COL.normal
+      const startSm   = startOrig * SAMPLES
+      const endSm     = endOrig   * SAMPLES
+      const segPts    = curvedPositions.slice(startSm, endSm + 1)
+      if (segPts.length < 2) continue
+
+      const pe = viewer.entities.add({
+        polyline: {
+          positions: segPts,
+          width: 4,
+          material: color,
+          depthFailMaterial: makeDepthFail(color),
+          clampToGround: false,
+        },
+      })
+      segMeta.push({ entity: pe, startSm, endSm, phase, color })
+    }
+
+    // 3. 起终点标记
     const startEntity = viewer.entities.add({
       position: curvedPositions[0],
       point: {
@@ -460,8 +447,7 @@ function drawRoutes(routes) {
       },
     })
 
-    // 4. 无人机 Billboard：图像中心 = 实体坐标点，无像素偏移
-    //    → 任意相机角度下图标中心都精确落在航线曲线上
+    // 4. 无人机 Billboard
     const droneEntity = viewer.entities.add({
       position: curvedPositions[0],
       billboard: {
@@ -478,23 +464,12 @@ function drawRoutes(routes) {
     droneEntity._normalImage = droneNormalCanvas
     droneEntity._highlightImage = droneHighlightCanvas
 
-    routeEntities[route.id] = { polylines: [polylineEntity], droneEntity, startEntity, endEntity }
+    routeEntities[route.id] = {
+      polylines: segMeta.map(s => s.entity),   // for clearRouteEntities / flyTo
+      polylineSegs: segMeta,                     // for highlight/reset (phase color info)
+      droneEntity, startEntity, endEntity,
+    }
     routeAnimState[route.id] = { curvedPositions, droneEntity, progress: 0, route }
-
-    // 5. 异步抬升：在密集采样点上采样建筑高度，确保路段中间不穿模
-    //    关键：动画状态与折线使用同一组 positions，无人机与航线永远重合
-    liftCurvedPositions(curvedPositions).then(liftedPositions => {
-      if (!viewer || viewer.isDestroyed() || !routeEntities[route.id]) return
-      curvedPositions = liftedPositions
-      polylineEntity.polyline.positions = new Cesium.ConstantProperty(liftedPositions)
-      startEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[0])
-      endEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[liftedPositions.length - 1])
-      if (routeAnimState[route.id]) {
-        routeAnimState[route.id].curvedPositions = liftedPositions
-        droneEntity.position = new Cesium.ConstantPositionProperty(liftedPositions[0])
-      }
-      viewer.scene.requestRender()
-    }).catch(() => {})
   })
 
   startGlobalLoop()
@@ -536,6 +511,9 @@ function startGlobalLoop() {
       droneEntity.position = pos
     })
 
+    // requestRenderMode: true 下位置变更不会自动重绘，需手动触发一帧
+    if (viewer && !viewer.isDestroyed()) viewer.scene.requestRender()
+
     globalRafId = requestAnimationFrame(tick)
   }
   globalRafId = requestAnimationFrame(tick)
@@ -556,10 +534,12 @@ function highlightRoute(routeId) {
   Object.entries(routeEntities).forEach(([id, group]) => {
     const isSelected = Number(id) === routeId
 
-    group.polylines?.forEach((p) => {
-      p.polyline.width = isSelected ? 6 : 2
-      p.polyline.material = isSelected ? COL.highlight : COL.normal.withAlpha(0.2)
-      p.show = true
+    group.polylineSegs?.forEach((seg) => {
+      seg.entity.polyline.width = isSelected ? 6 : 2
+      seg.entity.polyline.material = isSelected
+        ? (COL.phaseHighlight[seg.phase] || COL.highlight)
+        : (seg.color || COL.phase[seg.phase] || COL.normal).withAlpha(0.3)
+      seg.entity.show = true
     })
 
     if (group.droneEntity) {
@@ -588,10 +568,10 @@ function resetRouteHighlight() {
   mapStore.selectedRouteId = null
 
   Object.entries(routeEntities).forEach(([, group]) => {
-    group.polylines?.forEach((p) => {
-      p.polyline.width = 4
-      p.polyline.material = COL.normal
-      p.show = true
+    group.polylineSegs?.forEach((seg) => {
+      seg.entity.polyline.width = 4
+      seg.entity.polyline.material = seg.color || COL.phase[seg.phase] || COL.normal
+      seg.entity.show = true
     })
     if (group.droneEntity?.billboard) {
       group.droneEntity.billboard.scale = 1.0
@@ -812,13 +792,13 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     minLng = Math.min(minLng, p.lng); maxLng = Math.max(maxLng, p.lng)
     minLat = Math.min(minLat, p.lat); maxLat = Math.max(maxLat, p.lat)
   }
-  const CORRIDOR = 360  // 走廊半宽（米）：绕行可用空间，超出走廊视作开阔（不采样）
+  const CORRIDOR = 250  // 走廊半宽（米）：绕行可用空间，超出走廊视作开阔（不采样）
   minLng -= CORRIDOR / _mLngRef; maxLng += CORRIDOR / _mLngRef
   minLat -= CORRIDOR / _MPD; maxLat += CORRIDOR / _MPD
 
-  // 固定 10m 栅格并对齐到全局整数格（缓存键依赖全局格号）；过大则按 2 的幂放粗
-  let CELL = 10, cellLat, cellLng, C0, R0, cols, rows, total
-  const MAX_CELLS = 60000
+  // 起始 15m 栅格；过大则按 2 的幂放粗；上限 20,000 格保证主线程不阻塞
+  let CELL = 15, cellLat, cellLng, C0, R0, cols, rows, total
+  const MAX_CELLS = 20000
   while (true) {
     cellLat = CELL / _MPD; cellLng = CELL / _mLngRef
     C0 = Math.floor(minLng / cellLng); R0 = Math.floor(minLat / cellLat)
@@ -855,37 +835,49 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   const buildH = new Float32Array(total)         // 建筑离地高度（走廊外＝0，视作开阔）
   const inCorridor = new Uint8Array(total)
   const needCells = []                            // 需新采样的格 {r,c,i}
-  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-    const i = r * cols + c
-    const cc = cellCenter(r, c)
-    if (distToSegsM(cc.lng, cc.lat) > CORRIDOR) continue
-    inCorridor[i] = 1
-    const cached = _bhCache.get(ckey(r, c))
-    if (cached !== undefined) { buildH[i] = cached; continue }
-    needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
+  for (let r = 0; r < rows; r++) {
+    if (r % 40 === 0 && r > 0) { await yld(); if (!live()) return null }  // 防格点扫描阻塞主线程
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c
+      const cc = cellCenter(r, c)
+      if (distToSegsM(cc.lng, cc.lat) > CORRIDOR) continue
+      inCorridor[i] = 1
+      const cached = _bhCache.get(ckey(r, c))
+      if (cached !== undefined) { buildH[i] = cached; continue }
+      needCells.push({ r, c, i, lng: cc.lng, lat: cc.lat })
+    }
   }
 
   if (onProgress) onProgress(0.03, needCells.length ? `采样真实建筑（${needCells.length} 点）` : '复用缓存')
   if (needCells.length) {
     const terrainProv = viewer.terrainProvider
-    // 地形：仅对需采样点做一次性采样（平缓，足够）；与场景采样并行
-    const terrCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
-    const sceneCarto = needCells.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
-    const terrainPromise = terrainProv
-      ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
-    const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
-    const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
-    if (!live()) return null
-    if (scene === null) return null   // 采样失败/瓦片未就绪 → 交回退（不写入错误缓存）
-    for (let k = 0; k < needCells.length; k++) {
-      const { i } = needCells[k]
-      const sh = (scene[k] && Number.isFinite(scene[k].height)) ? scene[k].height : 0
-      const th = (terr && terr[k] && Number.isFinite(terr[k].height)) ? terr[k].height : 0
-      const h = Math.max(0, sh - th)
-      buildH[i] = h
-      _bhCache.set(ckey(needCells[k].r, needCells[k].c), h)   // 写入缓存
+    // 分批采样（每批 250 点），每批之间让出主线程并更新进度条，避免单次大批阻塞页面
+    const BATCH = 250
+    let anySceneFailed = false
+    for (let b = 0; b < needCells.length; b += BATCH) {
+      if (!live()) return null
+      const slice = needCells.slice(b, b + BATCH)
+      const terrCarto = slice.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+      const sceneCarto = slice.map(c => Cesium.Cartographic.fromDegrees(c.lng, c.lat))
+      const terrainPromise = terrainProv
+        ? Cesium.sampleTerrainMostDetailed(terrainProv, terrCarto).catch(() => null) : Promise.resolve(null)
+      const scenePromise = viewer.scene.sampleHeightMostDetailed(sceneCarto).catch(() => null)
+      const [terr, scene] = await Promise.all([terrainPromise, scenePromise])
+      if (!live()) return null
+      if (scene === null) { anySceneFailed = true; break }
+      for (let k = 0; k < slice.length; k++) {
+        const { i } = slice[k]
+        const sh = (scene[k] && Number.isFinite(scene[k].height)) ? scene[k].height : 0
+        const th = (terr && terr[k] && Number.isFinite(terr[k].height)) ? terr[k].height : 0
+        buildH[i] = Math.max(0, sh - th)
+        _bhCache.set(ckey(slice[k].r, slice[k].c), buildH[i])
+      }
+      const pct = 0.03 + 0.38 * (b + slice.length) / needCells.length
+      if (onProgress) onProgress(pct, `采样建筑高度 ${b + slice.length}/${needCells.length}`)
+      await yld()   // 每批完成后让出主线程，保持 UI 响应
     }
-    if (_bhCache.size > 400000) _bhCache.clear()   // 防无限增长
+    if (anySceneFailed) return null
+    if (_bhCache.size > 400000) _bhCache.clear()
   }
 
   // 关键：无论是否采样（缓存全部命中时没有任何 await），都必须在此处让出主线程。
@@ -894,7 +886,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   if (!live()) return null
 
   // ── 3. 障碍栅格：高于可越顶的真实建筑 + 禁飞区 ───────────────
-  if (onProgress) onProgress(0.44, '规划绕行航线')
+  if (onProgress) onProgress(0.42, '规划绕行航线')
   const blocked = new Uint8Array(total)  // 0 通行 / 1 建筑 / 2 禁飞
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const i = r * cols + c
@@ -930,8 +922,9 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
     const sKey = sCell.r * cols + sCell.c
     gS.set(sKey, 0); open.push({ r: sCell.r, c: sCell.c, f: oct(sCell.r, sCell.c) })
     const closed = new Set(); let guard = 0
-    while (open.size && guard++ < total) {
-      if (guard % 500 === 0) { await yld(); if (!live()) return null }
+    const guardLimit = Math.min(total, 60000)
+    while (open.size && guard++ < guardLimit) {
+      if (guard % 200 === 0) { await yld(); if (!live()) return null }
       const cur = open.pop(); const cK = cur.r * cols + cur.c
       if (cK === gKey) { const cells = []; let k = cK; while (k !== undefined) { cells.push({ r: Math.floor(k / cols), c: k % cols }); k = par.get(k) } cells.reverse(); return cells }
       if (closed.has(cK)) continue
@@ -975,7 +968,7 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
   for (let s = 0; s < _segTotal; s++) {
     const seg = await astarSeg(nearestFree(toCell(controlPts[s])), nearestFree(toCell(controlPts[s + 1])))
     if (!live()) return null
-    if (onProgress) onProgress(0.44 + 0.44 * (s + 1) / _segTotal, `绕行规划 ${s + 1}/${_segTotal} 段`)
+    if (onProgress) onProgress(0.42 + 0.46 * (s + 1) / _segTotal, `绕行规划 ${s + 1}/${_segTotal} 段`)
     let segPts
     if (!seg) { feasible = false; segPts = [controlPts[s], controlPts[s + 1]] }
     else {
@@ -1041,7 +1034,8 @@ async function planAroundBuildings(controlPts, opts = {}, onProgress = null) {
 }
 
 // 核心绘制逻辑（同步），接受任意高度剖面（初始或校正后均可）
-function _drawPlanPathCore(pathPoints, altitudeProfile) {
+// terrainHeights: 与 pathPoints 等长的地形海拔数组（米），null 表示无地形数据（退化为 alt 直接当 MSL）
+function _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights = null) {
   if (!viewer || !pathPoints?.length) return
 
   const C = (hex) => Cesium.Color.fromCssColorString(hex)
@@ -1053,7 +1047,10 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
 
   if (!hasProfile) {
-    const positions = pathPoints.map(p => Cesium.Cartesian3.fromDegrees(p.lng, p.lat, 120))
+    const positions = pathPoints.map((p, i) => {
+      const groundH = terrainHeights ? (terrainHeights[i] ?? 0) : 0
+      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, groundH + 120)
+    })
     planPathEntities.push(viewer.entities.add({
       polyline: { positions, width: 5, material: C('#3b82f6'), clampToGround: false }
     }))
@@ -1076,8 +1073,9 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
     if (segPts.length < 2) continue
 
     const positions = segPts.map((p, k) => {
-      const alt = altitudeProfile[startIdx + k]?.alt ?? 120
-      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt)
+      const agl      = altitudeProfile[startIdx + k]?.alt ?? 120
+      const groundH  = terrainHeights ? (terrainHeights[startIdx + k] ?? 0) : 0
+      return Cesium.Cartesian3.fromDegrees(p.lng, p.lat, groundH + agl)
     })
 
     const isAvoid = phase === 'building' || phase === 'no_fly'
@@ -1108,8 +1106,10 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
   for (let bi = 1; bi < boundaries.length - 1; bi++) {
     const idx = boundaries[bi]
     const p   = pathPoints[idx]
-    const alt = altitudeProfile[idx]?.alt ?? 0
-    if (!alt) continue
+    const agl = altitudeProfile[idx]?.alt ?? 0
+    if (!agl) continue
+    const groundH = terrainHeights ? (terrainHeights[idx] ?? 0) : 0
+    const alt = groundH + agl
     planPathEntities.push(viewer.entities.add({
       position: Cesium.Cartesian3.fromDegrees(p.lng, p.lat, alt + 30),
       label: {
@@ -1127,6 +1127,21 @@ function _drawPlanPathCore(pathPoints, altitudeProfile) {
 }
 
 // 外部接口：先用服务端剖面立即绘制，再异步用真实 OSM 建筑做细密横向避让重绘
+// 采样路径各点的地形海拔，返回与 pathPoints 等长的高度数组（米）
+// EllipsoidTerrainProvider（无地形）时返回 null
+async function _sampleTerrainHeights(pathPoints) {
+  const tp = viewer?.terrainProvider
+  if (!tp || tp instanceof Cesium.EllipsoidTerrainProvider) return null
+  try {
+    const cartos = pathPoints.map(p => Cesium.Cartographic.fromDegrees(p.lng, p.lat))
+    const sampled = await Cesium.sampleTerrainMostDetailed(tp, cartos)
+    return sampled.map(c => c.height ?? 0)
+  } catch (e) {
+    console.warn('[Cesium] 地形采样失败，AGL 将作为 MSL 使用:', e.message)
+    return null
+  }
+}
+
 async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   // 绘制令牌：若本次 drawPlanPath 尚未完成时又发起新的，则旧调用在每个 await 后检查并退出
   const drawToken = ++_drawToken
@@ -1135,13 +1150,26 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
   clearPlanPath()
   if (!viewer || !pathPoints?.length) return
 
-  // 第一步：立即展示服务端路径（快速反馈）
-  _drawPlanPathCore(pathPoints, altitudeProfile)
+  // 第一步：采样地形高度（AGL → MSL 转换），再绘制路径
+  // 先渲染一帧占位（避免白屏感），然后异步取地形后立即重绘
+  _drawPlanPathCore(pathPoints, altitudeProfile, null)
   viewer.scene.requestRender()
+
+  const terrainHeights = await _sampleTerrainHeights(pathPoints)
+  if (!drawAlive()) return
+  if (terrainHeights) {
+    clearPlanPath()
+    _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights)
+    viewer.scene.requestRender()
+  }
 
   // 第二步：异步避障重绘（仅在开启避障且有剖面时）
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
-  if (!hasProfile || opts.avoidBuildings === false) return
+  if (!hasProfile || opts.avoidBuildings === false) {
+    // 无避障，以原始路径作为最终路径上报
+    if (opts.onFinalPath) opts.onFinalPath(pathPoints, altitudeProfile)
+    return
+  }
 
   // 首选：客户端"贴地规划再平移高空"——用真实 OSM 建筑做精细栅格水平绕行
   if (opts.controlPts && opts.controlPts.length >= 2) {
@@ -1153,8 +1181,12 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
       if (!drawAlive()) return   // 新规划已触发，丢弃旧结果
       if (planned && planned.path.length) {
         clearPlanPath()
-        _drawPlanPathCore(planned.path, planned.altitude_profile)
+        const th = await _sampleTerrainHeights(planned.path)
+        if (!drawAlive()) return
+        _drawPlanPathCore(planned.path, planned.altitude_profile, th)
         viewer.scene.requestRender()
+        // 客户端精细路径作为最终路径上报（含完整建筑避让）
+        if (opts.onFinalPath) opts.onFinalPath(planned.path, planned.altitude_profile)
         return
       }
     } catch { /* 规划失败 → 回退垂直防穿模 */ }
@@ -1169,9 +1201,16 @@ async function drawPlanPath(pathPoints, altitudeProfile, opts = {}) {
     if (!drawAlive()) return
     if (!corrected) return
     clearPlanPath()
-    _drawPlanPathCore(corrected, corrected)
+    const th = await _sampleTerrainHeights(corrected)
+    if (!drawAlive()) return
+    _drawPlanPathCore(corrected, corrected, th)
     viewer.scene.requestRender()
-  } catch { /* 采样失败，保留初始绘制 */ }
+    // 垂直校正后的路径作为最终路径上报
+    if (opts.onFinalPath) opts.onFinalPath(corrected, corrected)
+  } catch {
+    // 采样失败，以原始路径上报
+    if (opts.onFinalPath) opts.onFinalPath(pathPoints, altitudeProfile)
+  }
 }
 
 function clearPlanPath() {

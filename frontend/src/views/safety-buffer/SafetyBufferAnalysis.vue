@@ -84,6 +84,15 @@
             <span class="drone-pos">{{ (d.progress * 100).toFixed(0) }}%</span>
             <span class="drone-alt">H{{ Math.round(d.altitude) }}m</span>
           </div>
+          <div class="drone-speed-row">
+            <span class="drone-speed"
+              :class="(d.effectiveSpeedFactor ?? 1) === 0 ? 'speed-stop' : (d.effectiveSpeedFactor ?? 1) < 0.7 ? 'speed-slow' : 'speed-normal'">
+              {{ (d.effectiveSpeedFactor ?? 1) === 0 ? '⛔ 已停止'
+                : (d.effectiveSpeedFactor ?? 1) < 0.7
+                  ? `⬇ ${(d.speed / 3600 * (d.effectiveSpeedFactor ?? 1)).toFixed(1)} m/s（减速 ${Math.round((1 - (d.effectiveSpeedFactor ?? 1)) * 100)}%）`
+                  : `✈ ${(d.speed / 3600).toFixed(1)} m/s` }}
+            </span>
+          </div>
         </div>
         <div v-if="conflictCount > 0" class="conflict-warn">
           ⚠️ {{ conflictCount }} 处缓冲区重叠，请查看事件日志
@@ -146,13 +155,29 @@
             冲突（球体相交）
           </div>
           <div class="legend-divider"></div>
+          <div class="legend-item" style="font-weight:600;color:#374151;font-size:11px">航线飞行阶段</div>
           <div class="legend-item">
-            <span class="legend-swatch" style="background:transparent;border:1px dashed #94a3b8"></span>
-            航线走廊
+            <span class="legend-swatch" style="background:#22c55e"></span>爬升段
           </div>
-          <div class="legend-item" v-for="r in ROUTES" :key="r.id">
+          <div class="legend-item">
+            <span class="legend-swatch" style="background:#3b82f6"></span>巡航段
+          </div>
+          <div class="legend-item">
+            <span class="legend-swatch" style="background:#f59e0b"></span>下降段
+          </div>
+          <div class="legend-item">
+            <span class="legend-swatch" style="background:#a855f7"></span>建筑避让（抬升）
+          </div>
+          <div class="legend-item">
+            <span class="legend-swatch" style="background:#ef4444"></span>限高区（压低）
+          </div>
+          <div class="legend-divider"></div>
+          <div class="legend-item" style="font-weight:600;color:#374151;font-size:11px">全部航线</div>
+          <div class="legend-item" v-for="r in SAMPLE_ROUTES" :key="r.id">
             <span class="legend-swatch" :style="{ background: r.color }"></span>
-            {{ r.name }}
+            <span :style="ROUTES.some(m => m.id === r.id) ? 'font-weight:600;color:#1d4ed8' : ''">
+              {{ r.name }}{{ ROUTES.some(m => m.id === r.id) ? ' ★' : '' }}
+            </span>
           </div>
         </div>
       </div>
@@ -164,6 +189,7 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { ElMessage } from 'element-plus'
+import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 // ═══════════════════════════════════════════════════════════
 // Cesium 动态加载
@@ -195,26 +221,19 @@ async function loadCesium() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 交叉航线定义（4条航线穿过广州核心区域，多处交叉）
+// 从共享航线库中选取 4 条有交叉的航线（与态势大屏/路径规划同源）
+// Route 6（越秀纵向线，index 5）作 N-S 主轴，与其余三条东北/东向线形成多处交叉
 // ═══════════════════════════════════════════════════════════
-const ROUTES = [
-  {
-    id: 'route-a', name: '番禺→天河纵向线', color: '#3b82f6',
-    pts: [[113.3100, 23.0700], [113.3120, 23.0850], [113.3160, 23.1000], [113.3200, 23.1150], [113.3245, 23.1300]],
-  },
-  {
-    id: 'route-b', name: '白云→海珠斜穿线', color: '#8b5cf6',
-    pts: [[113.2900, 23.1550], [113.3000, 23.1350], [113.3120, 23.1180], [113.3220, 23.1020], [113.3300, 23.0880]],
-  },
-  {
-    id: 'route-c', name: '荔湾→黄埔横向线', color: '#10b981',
-    pts: [[113.2550, 23.1120], [113.2750, 23.1140], [113.3000, 23.1160], [113.3220, 23.1180], [113.3450, 23.1200]],
-  },
-  {
-    id: 'route-d', name: '越秀→番禺斜穿线', color: '#f59e0b',
-    pts: [[113.2800, 23.1400], [113.2900, 23.1250], [113.3050, 23.1080], [113.3180, 23.0920], [113.3300, 23.0780]],
-  },
-]
+const ROUTES = [0, 4, 5, 8].map(i => SAMPLE_ROUTES[i])
+// 选取：[0]番禺→天河干线  [4]荔湾→天河线  [5]越秀纵向线  [8]番禺→天河南线
+
+const PHASE_COLORS = {
+  ascent: '#22c55e',
+  cruise: '#3b82f6',
+  descent: '#f59e0b',
+  height_limit: '#ef4444',
+  building: '#a855f7',
+}
 
 // ═══════════════════════════════════════════════════════════
 // 工具函数
@@ -255,11 +274,9 @@ function posOnRoute(routeIdx, t) {
   const a = r.pts[seg], b = r.pts[Math.min(seg + 1, r.pts.length - 1)]
   const lng = a[0] + (b[0] - a[0]) * local
   const lat = a[1] + (b[1] - a[1]) * local
-  // 高度：起飞/降落段 + 巡航段
-  let alt
-  if (t < 0.10) alt = 30 + (120 - 30) * (t / 0.10)
-  else if (t > 0.90) alt = 30 + (120 - 30) * ((1 - t) / 0.10)
-  else alt = 120
+  // 从 altitude_profile 读取真实高度（与 SAMPLE_ROUTES 高度剖面一致）
+  const ptIdx = Math.min(Math.round(t * (r.pts.length - 1)), r.pts.length - 1)
+  const alt = r.altitude_profile?.[ptIdx]?.alt ?? 120
   return { lng, lat, alt }
 }
 
@@ -345,7 +362,7 @@ const tickMarks = computed(() => {
   return marks
 })
 
-const statusLabel = { normal: '正常', warning: '警戒', conflict: '⚠ 冲突' }
+const statusLabel = { normal: '✈ 正常', warning: '⬇ 减速', conflict: '⛔ 停止' }
 
 // 无人机实时状态（按当前时段初始化）
 const drones = reactive([])
@@ -360,6 +377,7 @@ function rebuildDroneList() {
       progress: d.startProgress,
       lng: pos.lng, lat: pos.lat, altitude: pos.alt,
       status: 'normal',
+      effectiveSpeedFactor: 1.0,  // 1.0=正常 / 0~0.6=减速 / 0=停止
       routeName: ROUTES[d.routeIdx].name,
       bufferR: config.horizontalBuffer,
     })
@@ -373,66 +391,102 @@ rebuildDroneList()
 const conflictCount = computed(() => drones.filter(d => d.status === 'conflict').length)
 
 function detectConflicts() {
-  // 更新所有无人机位置
+  // 更新位置
   drones.forEach(d => {
     const pos = posOnRoute(d.routeIdx, d.progress)
     d.lng = pos.lng; d.lat = pos.lat; d.altitude = pos.alt
     d.bufferR = config.horizontalBuffer
   })
 
-  // 先全部重置为 normal，再由后续检测升级为 warning/conflict
-  drones.forEach(d => { d.status = 'normal' })
+  // 重置状态和速度系数
+  drones.forEach(d => { d.status = 'normal'; d.effectiveSpeedFactor = 1.0 })
 
-  // 两两检测
-  const conflicts = []
+  const currentConflictPairs = new Set()
+  const currentWarnPairs = new Set()
+  const newConflicts = []
+  const newWarnings = []
+
   for (let i = 0; i < drones.length; i++) {
     for (let j = i + 1; j < drones.length; j++) {
       const a = drones[i], b = drones[j]
-      const d3 = dist3D(a, b)
       const hDist = Math.sqrt(
         ((b.lng - a.lng) * Math.cos(a.lat * Math.PI / 180) * 111320) ** 2 +
         ((b.lat - a.lat) * 111320) ** 2
       )
       const vDist = Math.abs(b.altitude - a.altitude)
-      const r = config.horizontalBuffer
+      const bufR = config.horizontalBuffer
+      const warnR = config.warnDistance
+      // 对称 key，与顺序无关
+      const pairKey = [a.name, b.name].sort().join(' & ')
 
-      if (d3 < r * 2) {
-        const prevA = a.status, prevB = b.status
+      if (hDist < bufR * 2) {
+        // ── 安全缓冲区重叠 → 冲突 ──
         a.status = 'conflict'; b.status = 'conflict'
+        currentConflictPairs.add(pairKey)
 
-        // 同一航线上的前后机 → 追越冲突
+        // 优先级规则：同航线→后机（progress小）停止；跨航线→routeIdx大的让路
         const sameRoute = a.routeIdx === b.routeIdx
-        // 不同航线交叉 → 交叉冲突
-        const crossRoute = !sameRoute
+        let stopDrone, goDrone
+        if (sameRoute) {
+          stopDrone = a.progress <= b.progress ? a : b
+          goDrone   = stopDrone === a ? b : a
+        } else {
+          stopDrone = a.routeIdx > b.routeIdx ? a : b
+          goDrone   = stopDrone === a ? b : a
+        }
+        // 实际速度控制：让路机停止，优先机减速通过
+        stopDrone.effectiveSpeedFactor = 0
+        goDrone.effectiveSpeedFactor = Math.min(goDrone.effectiveSpeedFactor, 0.6)
 
-        if (prevA !== 'conflict' || prevB !== 'conflict') {
+        if (!prevConflictPairs.has(pairKey)) {
           let solution = ''
           if (vDist < config.verticalBuffer) {
-            // 垂直方向也重叠 → 严重冲突
-            const altA = Math.max(a.altitude, b.altitude) + config.verticalBuffer + 10
-            solution = `严重交叉冲突！建议${a.name}爬升至${Math.round(altA)}m以上，${b.name}保持${Math.round(b.altitude)}m，垂直错开≥${config.verticalBuffer}m`
-          } else if (crossRoute) {
-            // 交叉航线 → 建议时间错开
-            const behind = a.progress < b.progress ? a : b
-            const ahead = a.progress < b.progress ? b : a
-            const waitSec = Math.round(r * 2 / (behind.speed / 3600))
-            solution = `交叉航线冲突（水平距${Math.round(hDist)}m）。建议${behind.name}减速等待约${waitSec}s，让${ahead.name}先行通过交叉点`
+            const altHigh = Math.max(a.altitude, b.altitude) + config.verticalBuffer + 10
+            solution = `${stopDrone.name} 已自动停止。请人工指令其爬升至 ${Math.round(altHigh)}m 以上，与 ${goDrone.name} 垂直错开 ≥${config.verticalBuffer}m`
+          } else if (!sameRoute) {
+            solution = `${stopDrone.name} 已自动停止，等待优先级更高的 ${goDrone.name} 通过交叉点（减速60%）后自动恢复`
           } else {
-            // 同航线 → 保持间距
-            const behind = a.progress < b.progress ? a : b
-            solution = `同航线追越冲突。建议${behind.name}减速至50%速度，保持≥${r * 2}m安全间距`
+            solution = `${stopDrone.name}（后机）已自动停止，${goDrone.name}（前机）减速 40% 拉开间距，恢复安全间隔后自动继续`
           }
-          conflicts.push({ drones: [a.name, b.name], hDist, vDist, solution, sameRoute, crossRoute })
+          newConflicts.push({ names: [a.name, b.name], hDist, vDist, solution })
         }
-      } else if (d3 < r * 3) {
-        // 警戒区（只在还不是 conflict 时设为 warning）
-        if (a.status !== 'conflict') a.status = 'warning'
-        if (b.status !== 'conflict') b.status = 'warning'
+      } else if (hDist < warnR * 2) {
+        // ── 警戒区重叠 → 预警+减速 ──
+        currentWarnPairs.add(pairKey)
+        if (a.status !== 'conflict') { a.status = 'warning'; a.effectiveSpeedFactor = Math.min(a.effectiveSpeedFactor, 0.5) }
+        if (b.status !== 'conflict') { b.status = 'warning'; b.effectiveSpeedFactor = Math.min(b.effectiveSpeedFactor, 0.5) }
+
+        if (!prevWarnPairs.has(pairKey)) {
+          // 估算进入冲突区剩余时间
+          const approachSpeed = (a.speed + b.speed) / 2 / 3600  // m/s 平均接近速度（保守）
+          const margin = hDist - bufR * 2
+          const etaSec = approachSpeed > 0 ? Math.round(margin / approachSpeed) : 999
+          newWarnings.push({
+            names: [a.name, b.name], hDist,
+            solution: `${a.name} 与 ${b.name} 已自动减速至 50%。当前间距 ${Math.round(hDist)}m，预计约 ${etaSec}s 后进入冲突区，请及时干预`,
+          })
+        }
       }
-      // else: 已在开头重置为 normal，无需再处理
     }
   }
-  return conflicts
+
+  // ── 冲突已解除 ──
+  for (const key of prevConflictPairs) {
+    if (!currentConflictPairs.has(key)) {
+      addLog('success', `✅ 冲突解除：${key} 已安全分离，恢复正常飞行`)
+    }
+  }
+  // ── 警戒已解除（且未升级为冲突）──
+  for (const key of prevWarnPairs) {
+    if (!currentWarnPairs.has(key) && !currentConflictPairs.has(key)) {
+      addLog('info', `警戒解除：${key} 已离开警戒范围，恢复正常速度`)
+    }
+  }
+
+  prevConflictPairs = currentConflictPairs
+  prevWarnPairs = currentWarnPairs
+
+  return { newConflicts, newWarnings }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -463,6 +517,9 @@ function formatTime(mins) {
 // ═══════════════════════════════════════════════════════════
 let simTimer = null
 let lastTs = 0
+// 记录上一帧已激活的冲突/警戒对，避免每帧重复写日志
+let prevConflictPairs = new Set()
+let prevWarnPairs = new Set()
 
 function tick(ts) {
   if (!running.value) return
@@ -477,27 +534,36 @@ function tick(ts) {
     simTime.value = simDuration.value
     pauseSim()
     addLog('info', '仿真周期结束，所有无人机已完成巡检')
+    prevConflictPairs = new Set()
+    prevWarnPairs = new Set()
     detectConflicts()
     updateView()
     return
   }
 
-  // 推进每架无人机
+  // 推进每架无人机（使用 effectiveSpeedFactor 实现真实减速/停止）
   drones.forEach(d => {
     const rMeta = routeMeta[d.routeIdx]
-    const distPerSec = d.speed / 3600 // m/s
+    const factor = d.effectiveSpeedFactor ?? 1.0
+    const distPerSec = (d.speed / 3600) * factor  // 实际速度 m/s
     const progressDelta = (distPerSec * simDt) / rMeta.totalLen
     d.progress += progressDelta
-    if (d.progress >= 1.0) d.progress -= 1.0 // 循环
+    if (d.progress >= 1.0) d.progress -= 1.0
     if (d.progress < 0) d.progress += 1.0
   })
 
-  // 冲突检测
-  const newConflicts = detectConflicts()
+  // 冲突 & 警戒检测（同时更新下一帧的 effectiveSpeedFactor）
+  const { newConflicts, newWarnings } = detectConflicts()
   newConflicts.forEach(c => {
     addLog('danger',
-      `⚠️ ${c.drones[0]} 与 ${c.drones[1]} 缓冲区重叠（水平距${Math.round(c.hDist)}m，垂直距${Math.round(c.vDist)}m）`,
+      `⚠️ ${c.names[0]} 与 ${c.names[1]} 缓冲区重叠（水平距 ${Math.round(c.hDist)}m，垂直距 ${Math.round(c.vDist)}m）`,
       c.solution
+    )
+  })
+  newWarnings.forEach(w => {
+    addLog('warn',
+      `🔶 警戒预警：${w.names[0]} 与 ${w.names[1]} 警戒线重合（间距 ${Math.round(w.hDist)}m）`,
+      w.solution
     )
   })
 
@@ -527,7 +593,8 @@ function resetSim() {
   pauseSim()
   simTime.value = 0
   eventLog.value = []
-  // 重建无人机列表（重置所有进度）
+  prevConflictPairs = new Set()
+  prevWarnPairs = new Set()
   rebuildDroneList()
   detectConflicts()
   updateView()
@@ -556,6 +623,8 @@ function onPeriodChange() {
   simTime.value = 0
   simDuration.value = period.simMins
   eventLog.value = []
+  prevConflictPairs = new Set()
+  prevWarnPairs = new Set()
   rebuildDroneList()
   detectConflicts()
   updateView()
@@ -598,25 +667,49 @@ async function initAMap() {
 
 function drawRouteLines() {
   if (!map || !AMap) return
-  ROUTES.forEach(r => {
-    const line = new AMap.Polyline({
-      path: r.pts.map(([lng, lat]) => [lng, lat]),
-      strokeColor: r.color, strokeWeight: 2.5, strokeOpacity: 0.5,
-      strokeStyle: 'dashed', strokeDasharray: [8, 6],
-      lineJoin: 'round', lineCap: 'round', zIndex: 5,
-    })
-    map.add(line)
-    routeLines2D.push(line)
-    // 起终点标注
-    ;[r.pts[0], r.pts[r.pts.length - 1]].forEach(([lng, lat]) => {
-      const dot = new AMap.CircleMarker({
-        center: [lng, lat], radius: 4,
-        strokeColor: r.color, strokeWeight: 1.5,
-        fillColor: r.color, fillOpacity: 0.8, zIndex: 15,
+  SAMPLE_ROUTES.forEach(r => {
+    const pts   = r.pts
+    const profile = r.altitude_profile || []
+
+    // ── 与态势大屏 Amap2DView.drawRoutes 完全一致的分段算法 ──
+    const path = pts.map(([lng, lat]) => new AMap.LngLat(lng, lat))
+
+    const boundaries = [0]
+    for (let i = 1; i < path.length; i++) {
+      if ((profile[i]?.phase || 'cruise') !== (profile[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
+    for (let b = 0; b < boundaries.length; b++) {
+      const startIdx = boundaries[b]
+      const endIdx   = b < boundaries.length - 1 ? boundaries[b + 1] : path.length - 1
+      const phase    = profile[startIdx]?.phase || 'cruise'
+      const color    = PHASE_COLORS[phase] || '#10b981'
+      const segPts   = path.slice(startIdx, endIdx + 1)
+      if (segPts.length < 2) continue
+      const line = new AMap.Polyline({
+        path: segPts,
+        strokeColor: color, strokeWeight: 5, strokeOpacity: 0.92,
+        isOutline: true, outlineColor: 'rgba(255,255,255,0.55)', borderWeight: 2,
+        showDir: true,
+        lineJoin: 'round', lineCap: 'round', zIndex: 100,
       })
-      map.add(dot)
-      routeLines2D.push(dot)
+      map.add(line); routeLines2D.push(line)
+    }
+
+    // 起终点标记（与态势大屏一致：绿色起点 / 红色终点）
+    const startM = new AMap.Marker({
+      position: path[0],
+      content: '<div style="width:14px;height:14px;background:#10b981;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7), zIndex: 110,
     })
+    const endM = new AMap.Marker({
+      position: path[path.length - 1],
+      content: '<div style="width:14px;height:14px;background:#ef4444;border-radius:50%;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.25);"></div>',
+      offset: new AMap.Pixel(-7, -7), zIndex: 110,
+    })
+    map.add(startM); map.add(endM)
+    routeLines2D.push(startM, endM)
   })
 }
 
@@ -659,9 +752,11 @@ function updateAMap2D() {
       })
     }
 
-    // 无人机标签
+    // 无人机标签（含实际速度状态）
+    const factor = d.effectiveSpeedFactor ?? 1
+    const speedTag = factor === 0 ? ' ⛔停止' : factor < 0.7 ? ` ⬇${Math.round(d.speed * factor / 3600 * 10) / 10}m/s` : ''
     const icon = isConflict ? '⚠️' : isWarning ? '🔶' : '🚁'
-    const label = `${icon} ${d.name}`
+    const label = `${icon} ${d.name}${speedTag}`
     if (!droneMarkers2D[d.id]) {
       droneMarkers2D[d.id] = new AMap.Marker({
         position: center,
@@ -735,24 +830,45 @@ function buildCesiumEntities() {
   cesiumViewer.entities.removeAll()
   Object.keys(cesiumDronePositions).forEach(k => delete cesiumDronePositions[k])
 
-  // 绘制航线（虚线）
-  ROUTES.forEach(r => {
-    const positions = r.pts.flatMap(([lng, lat]) => {
-      const t = r.pts.findIndex(p => p[0] === lng && p[1] === lat) / (r.pts.length - 1)
-      const alt = t < 0.1 ? 30 + 90 * t / 0.1 : t > 0.9 ? 30 + 90 * (1 - t) / 0.1 : 120
-      return [lng, lat, alt]
-    })
-    cesiumViewer.entities.add({
-      polyline: {
-        positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
-        width: 2,
-        material: new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.fromCssColorString(r.color).withAlpha(0.5),
-          dashLength: 16,
-        }),
-        clampToGround: false,
-      },
-    })
+  // 绘制全部航线（按飞行阶段分段着色，虚线，高度来自 altitude_profile）
+  SAMPLE_ROUTES.forEach(r => {
+    const pts = r.pts
+    const altProfile = r.altitude_profile || []
+    const n = pts.length
+
+    // 检测阶段边界（与 2D drawRouteLines 逻辑一致）
+    const boundaries = [0]
+    for (let i = 1; i < n; i++) {
+      if ((altProfile[i]?.phase || 'cruise') !== (altProfile[i - 1]?.phase || 'cruise')) {
+        boundaries.push(i)
+      }
+    }
+
+    for (let b = 0; b < boundaries.length; b++) {
+      const startIdx = boundaries[b]
+      const endIdx   = b < boundaries.length - 1 ? boundaries[b + 1] : n - 1
+      const phase    = altProfile[startIdx]?.phase || 'cruise'
+      const color    = PHASE_COLORS[phase] || PHASE_COLORS.cruise
+
+      const segCoords = []
+      for (let i = startIdx; i <= endIdx; i++) {
+        const [lng, lat] = pts[i]
+        segCoords.push(lng, lat, altProfile[i]?.alt ?? 120)
+      }
+      if (segCoords.length < 6) continue
+
+      cesiumViewer.entities.add({
+        polyline: {
+          positions: Cesium.Cartesian3.fromDegreesArrayHeights(segCoords),
+          width: 3,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.fromCssColorString(color).withAlpha(0.75),
+            dashLength: 16,
+          }),
+          clampToGround: false,
+        },
+      })
+    }
   })
 
   // 为每架无人机创建实体
@@ -942,7 +1058,7 @@ function resetConfig() {
 // ═══════════════════════════════════════════════════════════
 onMounted(async () => {
   await initAMap()
-  addLog('info', '系统初始化完成，4条交叉航线，8架无人机，监测缓冲区重叠')
+  addLog('info', `系统初始化完成，4条交叉航线（${ROUTES.map(r => r.name).join('、')}），监测缓冲区重叠`)
 })
 
 onUnmounted(() => {
@@ -991,6 +1107,11 @@ onUnmounted(() => {
 .drone-route { font-size: 10px; color: #9ca3af; }
 .drone-pos { font-size: 10px; color: #6b7280; }
 .drone-alt { font-size: 10px; color: #6b7280; font-weight: 500; }
+.drone-speed-row { padding-left: 15px; margin-top: 3px; }
+.drone-speed { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.speed-normal { color: #16a34a; }
+.speed-slow   { color: #ca8a04; }
+.speed-stop   { color: #dc2626; }
 .conflict-warn {
   margin-top: 8px; padding: 7px 10px; background: #fef2f2; border: 1px solid #fecaca;
   border-radius: 6px; font-size: 11px; color: #dc2626; line-height: 1.5;

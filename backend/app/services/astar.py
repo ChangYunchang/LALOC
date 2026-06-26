@@ -103,8 +103,14 @@ class GridMap:
                     continue
                 nr, nc = cell.row + dr, cell.col + dc
                 neighbor = GridCell(nr, nc)
-                if self.is_valid(neighbor) and not self.is_blocked(neighbor):
-                    neighbors.append(neighbor)
+                if not self.is_valid(neighbor) or self.is_blocked(neighbor):
+                    continue
+                # 对角移动时，若两个拐角格均被阻塞则拒绝（防止从禁飞区角点穿越）
+                if dr != 0 and dc != 0:
+                    if self.is_blocked(GridCell(cell.row + dr, cell.col)) and \
+                       self.is_blocked(GridCell(cell.row, cell.col + dc)):
+                        continue
+                neighbors.append(neighbor)
         return neighbors
 
     def distance(self, cell1: GridCell, cell2: GridCell) -> float:
@@ -171,6 +177,18 @@ def build_grid_from_db(
                 ).fetchone()
                 if result and result[0]:
                     grid.blocked.add((row, col))
+
+    # 禁飞区安全缓冲：向外扩展 1 格，确保路径不紧贴区域边界
+    # （解决网格中心点判定导致的边界格漏判问题）
+    if grid.blocked:
+        buffer_cells: set[tuple[int, int]] = set()
+        for row, col in grid.blocked:
+            for dr in range(-1, 2):
+                for dc in range(-1, 2):
+                    nr, nc = row + dr, col + dc
+                    if 0 <= nr < grid.rows and 0 <= nc < grid.cols:
+                        buffer_cells.add((nr, nc))
+        grid.blocked.update(buffer_cells)
 
     # 查询限高区并记录限高信息
     height_limit_zones = db.query(HeightLimitZone).all()
@@ -308,94 +326,162 @@ def build_grid_from_db(
     return grid
 
 
+def _los_check(grid: GridMap, c1: GridCell, c2: GridCell) -> bool:
+    """
+    Bresenham 直线视线检查：c1→c2 路径上是否经过被阻塞或越界的网格。
+
+    额外检查对角步进时的两个拐角格，防止路径从两个对角阻塞格的夹缝穿越禁飞区边界。
+    """
+    r0, col0 = c1.row, c1.col
+    r1, col1 = c2.row, c2.col
+    dr = abs(r1 - r0)
+    dc = abs(col1 - col0)
+    sr = 1 if r1 > r0 else -1
+    sc = 1 if col1 > col0 else -1
+    err = dr - dc
+    r, c = r0, col0
+    while True:
+        cell = GridCell(r, c)
+        if not grid.is_valid(cell) or grid.is_blocked(cell):
+            return False
+        if r == r1 and c == col1:
+            return True
+        e2 = 2 * err
+        move_r = e2 > -dc
+        move_c = e2 < dr
+        # 对角步进时检查两个拐角格：若任一被阻塞，视线穿过禁飞区边界，返回不可见
+        if move_r and move_c:
+            cr = GridCell(r + sr, c)
+            cc = GridCell(r, c + sc)
+            if (grid.is_valid(cr) and grid.is_blocked(cr)) or \
+               (grid.is_valid(cc) and grid.is_blocked(cc)):
+                return False
+        if move_r:
+            err -= dc
+            r += sr
+        if move_c:
+            err += dr
+            c += sc
+
+
+def _smooth_cells(grid: GridMap, cells: list[GridCell]) -> list[GridCell]:
+    """
+    视线拉直（string pulling）：把 A* 格栅路径中可以直视的中间节点全部删除，
+    消除绕障产生的阶梯型锯齿。
+    """
+    if len(cells) <= 2:
+        return cells
+    result = [cells[0]]
+    i = 0
+    while i < len(cells) - 1:
+        # 从当前节点向终点方向找最远的可直视点
+        j = len(cells) - 1
+        while j > i + 1:
+            if _los_check(grid, result[-1], cells[j]):
+                break
+            j -= 1
+        result.append(cells[j])
+        i = j
+    return result
+
+
+def _move_cost(grid: GridMap, c1: GridCell, c2: GridCell) -> float:
+    """两格栅间移动代价：物理距离 + 限高 / 建筑惩罚"""
+    base = grid.distance(c1, c2)
+    nkey = (c2.row, c2.col)
+    height_limit = grid.height_limits.get(nkey)
+    if height_limit is not None and height_limit < 50:
+        base *= 2.0
+    building_h = grid.building_heights.get(nkey, 0)
+    if building_h > 100:
+        base *= (1.0 + building_h / 200.0)
+    return base
+
+
 def astar_search(
     grid: GridMap,
     start_lng: float, start_lat: float,
     end_lng: float, end_lat: float,
 ) -> Optional[list[tuple[float, float]]]:
     """
-    A* 搜索算法
+    Theta* 任意角度路径搜索（从算法根源消除 A* 网格搜索产生的阶梯折线震荡）
+
+    传统 A* 只能沿网格边移动，产生阶梯状路径，事后 string-pulling 无法根治
+    紧贴禁飞区边界的尖锐折角。Theta* 在扩展每个节点时检查其祖父节点对邻居
+    是否有直线视线（LOS）：若有，直接连接祖父→邻居跳过父节点，从而在搜索
+    阶段本身产生任意角度的平滑路径。
 
     返回: 路径点列表 [(lng, lat), ...]，或 None（不可达）
     """
     start_cell = grid.lnglat_to_cell(start_lng, start_lat)
     end_cell = grid.lnglat_to_cell(end_lng, end_lat)
 
-    # 检查起点和终点是否可达
-    if grid.is_blocked(start_cell):
-        return None
-    if grid.is_blocked(end_cell):
+    if grid.is_blocked(start_cell) or grid.is_blocked(end_cell):
         return None
 
-    # 初始化
-    open_set: list[AStarNode] = []
+    open_heap: list = []
     closed_set: set[tuple[int, int]] = set()
+    g_scores: dict[tuple[int, int], float] = {}
+    # 每个格栅的最优父节点（GridCell 或 None 表示起点）
+    parent_map: dict[tuple[int, int], Optional[GridCell]] = {}
+    _seq = 0  # 单调递增序号，打破 f 相等时堆比较的不确定性（避免随机锯齿）
 
-    start_node = AStarNode(
-        f_cost=grid.distance(start_cell, end_cell),
-        cell=start_cell,
-        g_cost=0,
-    )
-    heapq.heappush(open_set, start_node)
+    s_key = (start_cell.row, start_cell.col)
+    g_scores[s_key] = 0.0
+    parent_map[s_key] = None
+    h0 = grid.distance(start_cell, end_cell)
+    heapq.heappush(open_heap, (h0, _seq, start_cell))
 
-    # 记录每个节点的最优 g_cost
-    g_scores: dict[tuple[int, int], float] = {(start_cell.row, start_cell.col): 0}
+    max_iter = grid.rows * grid.cols * 2
 
-    iterations = 0
-    max_iterations = grid.rows * grid.cols  # 防止无限循环
+    for _ in range(max_iter):
+        if not open_heap:
+            break
 
-    while open_set and iterations < max_iterations:
-        iterations += 1
-        current = heapq.heappop(open_set)
+        _, _, current = heapq.heappop(open_heap)
+        c_key = (current.row, current.col)
 
-        # 到达终点
-        if current.cell == end_cell:
-            # 回溯路径
-            path = []
-            node = current
-            while node:
-                lng, lat = grid.cell_to_lnglat(node.cell.row, node.cell.col)
-                path.append((lng, lat))
-                node = node.parent
-            path.reverse()
-            return path
-
-        key = (current.cell.row, current.cell.col)
-        if key in closed_set:
+        if c_key in closed_set:
             continue
-        closed_set.add(key)
+        closed_set.add(c_key)
 
-        # 扩展邻居
-        for neighbor in grid.get_neighbors(current.cell):
-            nkey = (neighbor.row, neighbor.col)
-            if nkey in closed_set:
+        if current == end_cell:
+            # 沿 parent_map 回溯路径（节点已是任意角度的关键拐点）
+            cells: list[GridCell] = []
+            node: Optional[GridCell] = current
+            while node is not None:
+                cells.append(node)
+                node = parent_map.get((node.row, node.col))
+            cells.reverse()
+            # 额外 string-pulling：消除 Theta* 残余的轻微锯齿
+            cells = _smooth_cells(grid, cells)
+            return [grid.cell_to_lnglat(c.row, c.col) for c in cells]
+
+        g_s = g_scores[c_key]
+        # current 的父节点，用于 Theta* 祖父视线检查
+        grandparent: Optional[GridCell] = parent_map.get(c_key)
+
+        for neighbor in grid.get_neighbors(current):
+            n_key = (neighbor.row, neighbor.col)
+            if n_key in closed_set:
                 continue
 
-            # 计算移动代价
-            move_cost = grid.distance(current.cell, neighbor)
-            # 限高区惩罚（降低优先级但不阻断）
-            height_limit = grid.height_limits.get(nkey)
-            if height_limit is not None and height_limit < 50:
-                move_cost *= 2  # 限高很低的区域增加代价
-            # 建筑物惩罚：高于巡航高度的建筑增加代价
-            building_h = grid.building_heights.get(nkey, 0)
-            if building_h > 100:  # 超过巡航高度
-                move_cost *= (1 + building_h / 200)  # 越高代价越大
+            # ── Theta* 核心：祖父节点对邻居若视线通畅，直接连接跳过父节点 ──
+            if grandparent is not None and _los_check(grid, grandparent, neighbor):
+                gp_key = (grandparent.row, grandparent.col)
+                new_g = g_scores[gp_key] + _move_cost(grid, grandparent, neighbor)
+                new_parent = grandparent
+            else:
+                # 标准 A* 弛豫：经由当前节点
+                new_g = g_s + _move_cost(grid, current, neighbor)
+                new_parent = current
 
-            new_g = current.g_cost + move_cost
-
-            if new_g < g_scores.get(nkey, float('inf')):
-                g_scores[nkey] = new_g
+            if new_g < g_scores.get(n_key, float('inf')):
+                g_scores[n_key] = new_g
+                parent_map[n_key] = new_parent
                 h = grid.distance(neighbor, end_cell)
-                f = new_g + h
-
-                neighbor_node = AStarNode(
-                    f_cost=f,
-                    cell=neighbor,
-                    g_cost=new_g,
-                    parent=current,
-                )
-                heapq.heappush(open_set, neighbor_node)
+                _seq += 1
+                heapq.heappush(open_heap, (new_g + h, _seq, neighbor))
 
     return None  # 不可达
 
@@ -462,7 +548,7 @@ def compute_altitude_profile(
                     in_height_limit[i] = True
                     min_height_limit[i] = min(min_height_limit[i], zone["max_altitude"])
 
-    # ── 2. 查询建筑物（高效：采样路径点，单次SQL聚合查询）────
+    # ── 2. 查询建筑物（单次批量 SQL，避免 N 次往返）────────
     building_height_at_point = [0.0] * n
 
     try:
@@ -470,29 +556,38 @@ def compute_altitude_profile(
             text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'buildings')")
         ).fetchone()[0]
 
-        if table_exists:
-            # 全采样路径点，确保不遗漏任何建筑
-            sample_indices = list(range(0, n))  # 每个点采样，确保不遗漏建筑
-            for idx in sample_indices:
-                lng, lat = path[idx]
-                # 单次查询：获取该点所在建筑的最高高度
-                result = db.execute(
-                    text("""
-                        SELECT MAX(COALESCE(height, levels * 3.0, 10))
-                        FROM buildings
-                        WHERE ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
-                        AND (height >= 15 OR levels >= 5 OR (height IS NULL AND levels IS NULL))
-                    """),
-                    {"lng": lng, "lat": lat}
-                ).fetchone()
+        if table_exists and n > 0:
+            # 用 VALUES 子句一次性传入所有路径点，单次联表查询返回每点最大建筑高度
+            values_rows = ", ".join(f"({i}, :lng_{i}, :lat_{i})" for i in range(n))
+            params: dict = {}
+            for i, (lng, lat) in enumerate(path):
+                params[f"lng_{i}"] = lng
+                params[f"lat_{i}"] = lat
 
-                if result and result[0] and result[0] > 0:
-                    # 将建筑高度应用到该采样点及其附近的点
+            rows = db.execute(
+                text(f"""
+                    WITH pts(idx, lng, lat) AS (VALUES {values_rows})
+                    SELECT pts.idx,
+                           MAX(COALESCE(b.height, b.levels * 3.0, 10)) AS max_height
+                    FROM pts
+                    LEFT JOIN buildings b
+                        ON ST_Contains(b.geometry,
+                               ST_SetSRID(ST_MakePoint(pts.lng, pts.lat), 4326))
+                        AND (b.height >= 15
+                             OR b.levels >= 5
+                             OR (b.height IS NULL AND b.levels IS NULL))
+                    GROUP BY pts.idx
+                """),
+                params,
+            ).fetchall()
+
+            for row in rows:
+                idx, max_height = row
+                if max_height and float(max_height) > 0:
+                    h = float(max_height)
+                    # 将建筑高度扩散到相邻 ±2 个点，避免爬升段过短
                     for j in range(max(0, idx - 2), min(n, idx + 3)):
-                        building_height_at_point[j] = max(
-                            building_height_at_point[j],
-                            float(result[0])
-                        )
+                        building_height_at_point[j] = max(building_height_at_point[j], h)
     except Exception as e:
         print(f"  [提示] 建筑高度查询跳过: {e}")
 
@@ -547,6 +642,7 @@ def plan_path(
     waypoints: list[tuple[float, float]] = None,
     cell_size_meters: float = 50,
     drone_speed: float = 15.0,
+    cruise_alt: float = 100.0,
     safety_margin: float = 50.0,
     avoid_buildings: bool = True,
     consider_weather: bool = True,
@@ -636,7 +732,7 @@ def plan_path(
     estimated_time = total_distance / drone_speed if drone_speed > 0 else total_distance / 15.0
 
     # 计算高度剖面（考虑限高区和建筑物高度）
-    altitude_profile = compute_altitude_profile(db, full_path, building_safety_margin=safety_margin)
+    altitude_profile = compute_altitude_profile(db, full_path, cruise_alt=cruise_alt, building_safety_margin=safety_margin)
 
     return {
         "path": [

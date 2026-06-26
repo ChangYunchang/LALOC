@@ -253,7 +253,7 @@
 
     <!-- 地图区 — 使用统一的 MapContainer 组件 -->
     <div class="map-area">
-      <MapContainer ref="mapContainerRef" />
+      <MapContainer ref="mapContainerRef" :show-routes="false" />
 
     </div>
   </div>
@@ -267,7 +267,6 @@ import { checkPoint } from '@/api/zones'
 import MapContainer from '@/components/MapContainer.vue'
 import { useMapStore } from '@/stores/map'
 import { generateBoundaryPatrol, generateLawnmowerPatrol } from '@/utils/patrolRouteGenerator'
-
 const mapStore = useMapStore()
 const mapContainerRef = ref(null)
 
@@ -362,9 +361,9 @@ function confirmSaveRoute() {
     status: 'planned',
     total_distance: r.total_distance,
     estimated_time: r.estimated_time,
-    waypoints: r.path || [],
-    route_line: { type: 'LineString', coordinates: (r.path || []).map(p => [p.lng, p.lat]) },
-    altitude_profile: r.altitude_profile || [],
+    waypoints: lastPlanPath || r.path || [],
+    route_line: { type: 'LineString', coordinates: (lastPlanPath || r.path || []).map(p => [p.lng, p.lat]) },
+    altitude_profile: lastAltProfile || r.altitude_profile || [],
     created_at: new Date().toISOString(),
   }
   mapStore.addSavedRoute(route)
@@ -573,7 +572,7 @@ async function doPlan() {
       start, end,
       waypoints: waypointsList,
       drone_speed: droneSpeed.value,
-      suggested_alt: planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value,
+      cruise_alt: planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value,
       avoid_no_fly: avoidNoFly.value,
       avoid_height_limit: avoidHeightLimit.value,
       avoid_buildings: planningMode.value === 'points' ? avoidBuildings.value : false,
@@ -611,8 +610,6 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
 
   clearOldPath()
   mapRef.clearPlanPath()
-
-  await new Promise(r => setTimeout(r, 300))
 
   let adjustedPath = pathPoints
   let adjustedProfile = altitudeProfile
@@ -654,6 +651,13 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
   const cruiseAlt = planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value
   const useBuildings = planningMode.value === 'points' ? avoidBuildings.value : false
 
+  // onFinalPath 由 drawPlanPath 在最终路径确定后回调，更新 lastPlanPath/lastAltProfile
+  // 2D：绘制完成即回调；3D avoidBuildings：客户端 A* 精细路径完成后回调
+  const onFinalPath = (path, profile) => {
+    lastPlanPath = path
+    lastAltProfile = profile
+  }
+
   if (mapRef.viewMode === '3D' && planningMode.value === 'points') {
     planProgress.value = 18
     planProgressLabel.value = '计算真实建筑绕行航线'
@@ -662,6 +666,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
       onProgress: (frac, label) => {
         planProgress.value = Math.round(18 + frac * 82)
         planProgressLabel.value = label || ''
@@ -674,6 +679,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
     })
     planProgress.value = null
   } else {
@@ -682,6 +688,7 @@ async function drawRouteOnMap(pathPoints, altitudeProfile) {
       avoidBuildings: useBuildings,
       avoidNoFly: avoidNoFly.value,
       controlPts,
+      onFinalPath,
     })
     planProgress.value = null
   }

@@ -105,11 +105,19 @@ import { getAllRoutes } from '@/api/routes'
 import MapContainer from '@/components/MapContainer.vue'
 import WeatherPanel from '@/components/WeatherPanel.vue'
 import TimelineSlider from '@/components/TimelineSlider.vue'
+import { SAMPLE_ROUTES } from '@/data/sampleRoutes'
 
 const zoneStore = useZoneStore()
 const mapStore = useMapStore()
 const apiRoutes = ref([])
-const routes = computed(() => [...apiRoutes.value, ...mapStore.savedRoutes])
+// 只保留有完整高度剖面的航线；无 altitude_profile 或长度不匹配的 API/保存路线会退化成绿色，直接过滤掉
+const routes = computed(() => {
+  const all = [...SAMPLE_ROUTES, ...apiRoutes.value, ...mapStore.savedRoutes]
+  return all.filter(r =>
+    r.route_line?.coordinates &&
+    r.altitude_profile?.length === r.route_line.coordinates.length
+  )
+})
 const selectedRoute = ref(null)
 const mapContainerRef = ref(null)
 
