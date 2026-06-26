@@ -1,7 +1,6 @@
 <!--
   安全风险热力分析（6.3）— 6.3.3 热力图展示
   2D：AMap + HeatMap 插件，时间段/时间轴动画
-  3D：Cesium OSM 建筑场景 + 密度柱体实体
 -->
 <template>
   <div class="density-contour-page">
@@ -27,22 +26,14 @@
         <el-button size="small" @click="togglePlay">{{ playing ? '⏸ 暂停' : '▶ 自动播放' }}</el-button>
         <el-button size="small" @click="resetPlay">⏮ 重置</el-button>
       </div>
-      <div class="control-group mode-toggle">
-        <el-button-group size="small">
-          <el-button :type="viewMode === '2D' ? 'primary' : 'default'" @click="switchMode('2D')">2D 平面</el-button>
-          <el-button :type="viewMode === '3D' ? 'primary' : 'default'" @click="switchMode('3D')">3D 实景</el-button>
-        </el-button-group>
-      </div>
     </div>
 
     <!-- 地图容器区域 -->
     <div class="map-area">
       <!-- AMap 2D 热力图 -->
-      <div v-if="viewMode === '2D'" ref="mapRef" class="map-container"></div>
-      <!-- Cesium 3D 密度柱体 -->
-      <div v-if="viewMode === '3D'" ref="cesiumRef" class="map-container"></div>
+      <div ref="mapRef" class="map-container"></div>
 
-      <!-- 图例（两种模式共用） -->
+      <!-- 图例 -->
       <div class="legend">
         <div class="legend-title">飞行密度</div>
         <div class="legend-gradient"></div>
@@ -52,42 +43,15 @@
       <!-- 时刻信息牌 -->
       <div class="time-badge">
         {{ periodLabel }} · T={{ currentMinute }}min
-        <div class="time-sub" v-if="viewMode === '2D'">已加载 {{ heatPointCount }} 个密度采样点</div>
-        <div class="time-sub" v-else>3D 密度柱体：{{ columnCount }} 个节点</div>
+        <div class="time-sub">已加载 {{ heatPointCount }} 个密度采样点</div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
-
-let Cesium = null
-async function loadCesium() {
-  if (Cesium) return Cesium
-  window.CESIUM_BASE_URL = '/cesium/'
-  if (!document.querySelector('link[data-cesium]')) {
-    const link = document.createElement('link')
-    link.rel = 'stylesheet'
-    link.href = '/cesium/Widgets/widgets.css'
-    link.setAttribute('data-cesium', '1')
-    document.head.appendChild(link)
-  }
-  if (!window.Cesium) {
-    await new Promise((resolve, reject) => {
-      if (document.querySelector('script[data-cesium]')) { resolve(); return }
-      const script = document.createElement('script')
-      script.src = '/cesium/Cesium.js'
-      script.setAttribute('data-cesium', '1')
-      script.onload = resolve
-      script.onerror = () => reject(new Error('Cesium.js load failed'))
-      document.head.appendChild(script)
-    })
-  }
-  Cesium = window.Cesium
-  return Cesium
-}
 
 // ── 时段配置 ─────────────────────────────────────────
 const timePeriods = [
@@ -101,9 +65,7 @@ const currentMinute = ref(0)
 const maxMinute = ref(120)
 const opacity = ref(70)
 const playing = ref(false)
-const viewMode = ref('2D')
 const heatPointCount = ref(0)
-const columnCount = ref(0)
 
 const periodLabel = computed(() => timePeriods.find(p => p.value === selectedPeriod.value)?.label || '')
 
@@ -247,118 +209,16 @@ function updateOpacity() {
   heatmapLayer?.setOptions({ opacity: [0, opacity.value / 100] })
 }
 
-// ── Cesium 3D ────────────────────────────────────────
-let cesiumViewer = null
-const cesiumRef = ref(null)
-
-function densityColor(d) {
-  if (d > 0.85) return Cesium.Color.fromCssColorString('#dc2626').withAlpha(0.85)
-  if (d > 0.70) return Cesium.Color.fromCssColorString('#f97316').withAlpha(0.85)
-  if (d > 0.55) return Cesium.Color.fromCssColorString('#fbbf24').withAlpha(0.80)
-  if (d > 0.40) return Cesium.Color.fromCssColorString('#22d3ee').withAlpha(0.75)
-  return Cesium.Color.fromCssColorString('#3b82f6').withAlpha(0.75)
-}
-
-async function initCesium() {
-  if (!cesiumRef.value) return
-  await loadCesium()
-  Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
-  cesiumViewer = new Cesium.Viewer(cesiumRef.value, {
-    terrain: Cesium.Terrain.fromWorldTerrain(),
-    baseLayerPicker: false, geocoder: false, homeButton: false,
-    sceneModePicker: false, navigationHelpButton: false,
-    animation: false, timeline: false, fullscreenButton: false,
-    infoBox: false, selectionIndicator: false,
-  })
-  try {
-    const tileset = await Cesium.createOsmBuildingsAsync()
-    cesiumViewer.scene.primitives.add(tileset)
-  } catch {}
-  cesiumViewer.camera.setView({
-    destination: Cesium.Cartesian3.fromDegrees(113.3100, 23.1150, 9000),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-50), roll: 0 },
-  })
-  render3DColumns()
-}
-
-function render3DColumns() {
-  if (!cesiumViewer) return
-  cesiumViewer.entities.removeAll()
-  const pf = getPeakFactor(currentMinute.value)
-  const ef = getPeriodFactor()
-  let count = 0
-
-  // 先绘制航线走廊参考线（低空 60m，彩色半透明）
-  ROUTES.forEach(route => {
-    const positions = route.pts.flatMap(([lng, lat]) => [lng, lat, 60])
-    cesiumViewer.entities.add({
-      polyline: {
-        positions: Cesium.Cartesian3.fromDegreesArrayHeights(positions),
-        width: 3,
-        material: new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.fromCssColorString(route.color).withAlpha(0.55),
-          dashLength: 16,
-        }),
-        clampToGround: false,
-      },
-    })
-  })
-
-  // 再绘制密度柱体（沿航线节点，高度 = 密度）
-  ROUTES.forEach(route => {
-    route.pts.forEach(([lng, lat]) => {
-      const density = route.w * pf * ef
-      const h = Math.max(30, density * 260)
-      cesiumViewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(lng, lat, h / 2),
-        cylinder: {
-          length: h,
-          topRadius: 85,
-          bottomRadius: 85,
-          material: densityColor(density),
-          outline: false,
-        },
-      })
-      count++
-    })
-  })
-  columnCount.value = count
-  cesiumViewer.scene.requestRender()
-}
-
-function destroyCesium() {
-  if (cesiumViewer && !cesiumViewer.isDestroyed()) cesiumViewer.destroy()
-  cesiumViewer = null
-}
-
-// ── 模式切换 ─────────────────────────────────────────
-function switchMode(mode) {
-  if (viewMode.value === mode) return
-  if (playing.value) { clearInterval(playTimer); playing.value = false }
-  if (mode === '3D') {
-    destroyAMap()
-    viewMode.value = '3D'
-  } else {
-    destroyCesium()
-    viewMode.value = '2D'
-  }
-}
-
-watch(mapRef, async (el) => { if (el) { await nextTick(); initAMap() } })
-watch(cesiumRef, async (el) => { if (el) { await nextTick(); initCesium() } })
-
 // ── 控制回调 ─────────────────────────────────────────
 function onTimeChange(val) {
-  if (viewMode.value === '2D') updateHeatmap(val)
-  else render3DColumns()
+  updateHeatmap(val)
 }
 
 function onPeriodChange() {
   const p = timePeriods.find(t => t.value === selectedPeriod.value)
   maxMinute.value = p.duration
   currentMinute.value = 0
-  if (viewMode.value === '2D') updateHeatmap(0)
-  else render3DColumns()
+  updateHeatmap(0)
 }
 
 let playTimer = null
@@ -369,21 +229,22 @@ function togglePlay() {
     playTimer = setInterval(() => {
       if (currentMinute.value >= maxMinute.value) { clearInterval(playTimer); playing.value = false; return }
       currentMinute.value += 5
-      if (viewMode.value === '2D') updateHeatmap(currentMinute.value)
-      else render3DColumns()
+      updateHeatmap(currentMinute.value)
     }, 500)
   }
 }
 function resetPlay() {
   clearInterval(playTimer); playing.value = false; currentMinute.value = 0
-  if (viewMode.value === '2D') updateHeatmap(0)
-  else render3DColumns()
+  updateHeatmap(0)
 }
+
+onMounted(() => {
+  initAMap()
+})
 
 onUnmounted(() => {
   clearInterval(playTimer)
   destroyAMap()
-  destroyCesium()
 })
 </script>
 
@@ -394,7 +255,6 @@ onUnmounted(() => {
   padding: 10px 16px; background: #fff; border-bottom: 1px solid #e5e7eb; flex-shrink: 0;
 }
 .control-group { display: flex; align-items: center; gap: 8px; }
-.mode-toggle { margin-left: auto; }
 .ctrl-label { font-size: 13px; color: #374151; white-space: nowrap; }
 .map-area { flex: 1; position: relative; overflow: hidden; }
 .map-container { width: 100%; height: 100%; }

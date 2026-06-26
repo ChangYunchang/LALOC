@@ -84,13 +84,17 @@ async function createViewer() {
   Cesium.Ion.defaultAccessToken = cesiumIonToken
   console.log('Cesium loaded, creating viewer...')
 
+  // 带超时的地形加载（Cesium Ion token 过期会导致挂起，15s 超时回退）
   let terrainProvider
   if (cesiumIonToken && cesiumIonToken.length > 10) {
     try {
-      terrainProvider = await Cesium.createWorldTerrainAsync()
+      terrainProvider = await Promise.race([
+        Cesium.createWorldTerrainAsync(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Terrain load timeout')), 15000)),
+      ])
       console.log('World Terrain loaded')
     } catch (e) {
-      console.warn('World Terrain failed:', e.message)
+      console.warn('World Terrain failed, using ellipsoid:', e.message)
       terrainProvider = new Cesium.EllipsoidTerrainProvider()
     }
   } else {
@@ -123,13 +127,24 @@ async function createViewer() {
 
   viewer.cesiumWidget.creditContainer.style.display = 'none'
 
+  // 优先使用高德卫星图（国内访问快），失败回退 OSM
   try {
-    viewer.imageryLayers.addImageryProvider(
-      Cesium.createOpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
-    )
-    console.log('OpenStreetMap layer added')
+    const amapImagery = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+      subdomains: ['1', '2', '3', '4'],
+      maximumLevel: 18,
+    })
+    viewer.imageryLayers.addImageryProvider(amapImagery)
+    console.log('AMap satellite layer added')
   } catch (e) {
-    console.warn('OSM layer failed:', e.message)
+    console.warn('AMap layer failed, trying OSM:', e.message)
+    try {
+      viewer.imageryLayers.addImageryProvider(
+        Cesium.createOpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+      )
+    } catch (e2) {
+      console.warn('OSM layer also failed:', e2.message)
+    }
   }
 
   setTimeout(() => {
@@ -1215,6 +1230,313 @@ function clearCustomMarkers(entities) {
   entities.forEach(e => viewer?.entities.remove(e))
 }
 
+// ── 绘图工具 ─────────────────────────────────────────
+// 注：LEFT_CLICK 使用原生 canvas 事件监听，绕过 Cesium
+// ScreenSpaceEventHandler，后者在连续多次实体添加后可能无法
+// 可靠触发 click 事件，导致 4+ 顶点的多边形无法绘制。
+let drawHandler = null           // 仅用于 MOUSE_MOVE / RIGHT_CLICK
+let drawingVertices = []         // [{lng, lat, cartesian}] 已放置的顶点
+let drawingPreview = []          // 预览实体列表
+let drawMode = null              // 'line' | 'polygon'
+let drawFinishCallback = null
+let _lastKeyHandler = null       // 键盘事件监听器
+let _rawCanvasClick = null       // 原生 canvas click 监听器引用
+const DRAW_CLOSE_THRESHOLD = 30  // 像素，多边形闭合阈值
+
+function _clearDrawPreview() {
+  drawingPreview.forEach(e => viewer?.entities.remove(e))
+  drawingPreview = []
+}
+
+function _clearAllDrawing() {
+  _clearDrawPreview()
+  drawingVertices.forEach(v => viewer?.entities.remove(v.entity))
+  drawingVertices = []
+  if (drawHandler) {
+    drawHandler.destroy()
+    drawHandler = null
+  }
+}
+
+// 原生 canvas click 处理 —— 替代 ScreenSpaceEventHandler LEFT_CLICK，
+// 确保每次点击都能可靠触发，不受 Cesium 内部事件流干扰。
+function _onCanvasClick(e) {
+  if (!viewer || !drawMode) return
+
+  const rect = viewer.scene.canvas.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  // 忽略 canvas 区域外的点击
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return
+
+  const position = new Cesium.Cartesian2(x, y)
+  const cartesian = viewer.camera.pickEllipsoid(position, viewer.scene.globe.ellipsoid)
+  if (!cartesian) return
+
+  // 多边形模式：检查是否点击在首点附近（闭合判断）
+  if (drawMode === 'polygon' && drawingVertices.length >= 3) {
+    try {
+      const first = drawingVertices[0].cartesian
+      const screenFirst = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, first)
+      const screenCurrent = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, cartesian)
+      if (screenFirst && screenCurrent) {
+        const pixelDist = Math.sqrt(
+          Math.pow(screenFirst.x - screenCurrent.x, 2) + Math.pow(screenFirst.y - screenCurrent.y, 2)
+        )
+        if (pixelDist < DRAW_CLOSE_THRESHOLD) {
+          _finishDrawing()
+          return
+        }
+      }
+    } catch (err) {
+      console.warn('Polygon close-check failed, adding vertex anyway:', err.message)
+    }
+  }
+
+  _addDrawingVertex(cartesian)
+}
+
+function _cartesianToLngLat(cartesian) {
+  if (!cartesian) return null
+  const cartographic = Cesium.Cartographic.fromCartesian(cartesian)
+  return {
+    lng: Cesium.Math.toDegrees(cartographic.longitude),
+    lat: Cesium.Math.toDegrees(cartographic.latitude),
+  }
+}
+
+function _addDrawingVertex(cartesian) {
+  const lngLat = _cartesianToLngLat(cartesian)
+  if (!lngLat) return
+
+  // 克隆 Cartesian3，避免 Cesium 内部 scratch 对象复用导致引用被覆盖
+  const pos = Cesium.Cartesian3.clone(cartesian)
+
+  const entity = viewer.entities.add({
+    position: pos,
+    point: {
+      pixelSize: 10,
+      color: drawMode === 'line' ? Cesium.Color.fromCssColorString('#3b82f6') : Cesium.Color.fromCssColorString('#8b5cf6'),
+      outlineColor: Cesium.Color.WHITE,
+      outlineWidth: 2,
+      heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+    },
+  })
+  entity._isDrawVertex = true
+  drawingVertices.push({ lng: lngLat.lng, lat: lngLat.lat, cartesian: pos, entity })
+
+  // 更新动态连线预览（连接所有已放置顶点）
+  _redrawConnectingLines()
+}
+
+function _redrawConnectingLines() {
+  // 清除旧的连线预览
+  drawingPreview.forEach(e => viewer?.entities.remove(e))
+  drawingPreview = []
+
+  if (drawingVertices.length < 2) return
+
+  const positions = drawingVertices.map(v => v.cartesian)
+  // 预览始终使用开放链（不闭合），避免闭合线在 3+ 顶点后拦截后续点击
+  // 闭合边仅在用户确认（右键/Enter/点击首点）时由 _finishDrawing 添加
+  const linePositions = positions
+
+  const lineEntity = viewer.entities.add({
+    polyline: {
+      positions: linePositions,
+      width: 3,
+      material: new Cesium.PolylineDashMaterialProperty({
+        color: Cesium.Color.fromCssColorString(drawMode === 'line' ? '#3b82f6' : '#8b5cf6'),
+        dashLength: 16,
+      }),
+      clampToGround: true,
+    },
+  })
+  drawingPreview.push(lineEntity)
+}
+
+function _updateDrawPreview(movement) {
+  if (drawingVertices.length === 0) return
+  // 清除鼠标预览线
+  drawingPreview.filter(e => e._isMousePreview).forEach(e => viewer?.entities.remove(e))
+  drawingPreview = drawingPreview.filter(e => !e._isMousePreview)
+
+  const cartesian = viewer.camera.pickEllipsoid(movement.endPosition, viewer.scene.globe.ellipsoid)
+  if (!cartesian) return
+
+  const lastVertex = drawingVertices[drawingVertices.length - 1].cartesian
+  const previewEntity = viewer.entities.add({
+    polyline: {
+      positions: [lastVertex, cartesian],
+      width: 2,
+      material: new Cesium.PolylineDashMaterialProperty({
+        color: Cesium.Color.WHITE.withAlpha(0.6),
+        dashLength: 8,
+      }),
+      clampToGround: true,
+    },
+  })
+  previewEntity._isMousePreview = true
+  drawingPreview.push(previewEntity)
+}
+
+function _finishDrawing() {
+  const vertices = drawingVertices.map(v => ({ lng: v.lng, lat: v.lat }))
+
+  // 保留绘制的实体作为展示（替换预览虚线为实线）
+  _clearDrawPreview()
+  if (vertices.length >= 2) {
+    const positions = drawingVertices.map(v => v.cartesian)
+    const displayPositions = drawMode === 'polygon' && vertices.length >= 3
+      ? [...positions, positions[0]]
+      : positions
+    const displayEntity = viewer.entities.add({
+      polyline: {
+        positions: displayPositions,
+        width: 4,
+        material: Cesium.Color.fromCssColorString(drawMode === 'line' ? '#3b82f6' : '#8b5cf6').withAlpha(0.9),
+        clampToGround: true,
+      },
+    })
+    displayEntity._isDrawnResult = true
+    if (drawMode === 'polygon' && vertices.length >= 3) {
+      const polygonEntity = viewer.entities.add({
+        polygon: {
+          hierarchy: new Cesium.PolygonHierarchy(positions),
+          material: Cesium.Color.fromCssColorString('#c4b5fd').withAlpha(0.25),
+          clampToGround: true,
+        },
+      })
+      polygonEntity._isDrawnResult = true
+    }
+  }
+
+  // 清理键盘监听器
+  if (_lastKeyHandler) {
+    document.removeEventListener('keydown', _lastKeyHandler)
+    _lastKeyHandler = null
+  }
+
+  // 清理原生 canvas click 监听器
+  if (_rawCanvasClick) {
+    viewer?.scene?.canvas?.removeEventListener('click', _rawCanvasClick)
+    _rawCanvasClick = null
+  }
+
+  if (drawFinishCallback) drawFinishCallback(vertices)
+
+  // 清理绘制状态（但保留顶点标记实体供 clearDrawing 统一清除）
+  if (drawHandler) { drawHandler.destroy(); drawHandler = null }
+  drawFinishCallback = null
+  drawMode = null
+}
+
+function startDrawLine(onFinish) {
+  if (!viewer) return
+  stopDrawing()
+  drawMode = 'line'
+  drawFinishCallback = onFinish
+  drawingVertices = []
+
+  drawHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
+
+  // 原生 canvas click 监听（比 ScreenSpaceEventHandler LEFT_CLICK 更可靠）
+  _rawCanvasClick = (e) => _onCanvasClick(e)
+  viewer.scene.canvas.addEventListener('click', _rawCanvasClick)
+
+  // 鼠标移动预览
+  drawHandler.setInputAction((movement) => {
+    _updateDrawPreview(movement)
+  }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
+
+  // 右键完成（不添加新顶点，直接结束）
+  drawHandler.setInputAction(() => {
+    if (drawingVertices.length >= 2) _finishDrawing()
+    else console.warn('Polyline: at least 2 points needed to finish')
+  }, Cesium.ScreenSpaceEventType.RIGHT_CLICK)
+
+  // 双击完成
+  drawHandler.setInputAction(() => {
+    if (drawingVertices.length >= 2) _finishDrawing()
+  }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK)
+
+  // 键盘：Enter 完成，Escape 取消
+  _lastKeyHandler = (e) => {
+    if (e.key === 'Enter' && drawingVertices.length >= 2) {
+      e.preventDefault(); _finishDrawing()
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); stopDrawing()
+    }
+  }
+  document.addEventListener('keydown', _lastKeyHandler)
+}
+
+function startDrawPolygon(onFinish) {
+  if (!viewer) return
+  stopDrawing()
+  drawMode = 'polygon'
+  drawFinishCallback = onFinish
+  drawingVertices = []
+
+  drawHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
+
+  // 原生 canvas click 监听（比 ScreenSpaceEventHandler LEFT_CLICK 更可靠，
+  // 后者在多次实体添加后可能失效，导致 4+ 顶点多边形无法绘制）
+  _rawCanvasClick = (e) => _onCanvasClick(e)
+  viewer.scene.canvas.addEventListener('click', _rawCanvasClick)
+
+  // 鼠标移动预览
+  drawHandler.setInputAction((movement) => {
+    _updateDrawPreview(movement)
+  }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
+
+  // 右键闭合多边形
+  drawHandler.setInputAction(() => {
+    if (drawingVertices.length >= 3) _finishDrawing()
+    else console.warn('Polygon: at least 3 points needed to close')
+  }, Cesium.ScreenSpaceEventType.RIGHT_CLICK)
+
+  // 键盘：Enter 闭合，Escape 取消
+  _lastKeyHandler = (e) => {
+    if (e.key === 'Enter' && drawingVertices.length >= 3) {
+      e.preventDefault(); _finishDrawing()
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); stopDrawing()
+    }
+  }
+  document.addEventListener('keydown', _lastKeyHandler)
+}
+
+function stopDrawing() {
+  if (_lastKeyHandler) {
+    document.removeEventListener('keydown', _lastKeyHandler)
+    _lastKeyHandler = null
+  }
+  if (_rawCanvasClick) {
+    viewer?.scene?.canvas?.removeEventListener('click', _rawCanvasClick)
+    _rawCanvasClick = null
+  }
+  if (drawHandler) { drawHandler.destroy(); drawHandler = null }
+  _clearDrawPreview()
+  drawingVertices = []
+  drawFinishCallback = null
+  drawMode = null
+}
+
+function clearDrawing() {
+  stopDrawing()
+  // 清除之前绘制产生的所有实体（结果多段线/多边形、顶点标记）
+  const entities = viewer?.entities?.values
+  if (entities) {
+    for (let i = entities.length - 1; i >= 0; i--) {
+      const e = entities[i]
+      if (e._isDrawnResult || e._isDrawVertex) {
+        viewer.entities.remove(e)
+      }
+    }
+  }
+}
+
 defineExpose({
   drawRoutes,
   highlightRoute,
@@ -1231,6 +1553,10 @@ defineExpose({
   clearCustomMarkers,
   drawPlanPath,
   clearPlanPath,
+  startDrawLine,
+  startDrawPolygon,
+  stopDrawing,
+  clearDrawing,
 })
 </script>
 
