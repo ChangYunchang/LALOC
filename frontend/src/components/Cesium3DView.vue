@@ -71,12 +71,12 @@ function initColors() {
   COL.highlight = c('#f59e0b')
   COL.phase = {
     ascent: c('#22c55e'), cruise: c('#3b82f6'),
-    descent: c('#f59e0b'), height_limit: c('#ef4444'),
+    descent: c('#f59e0b'), height_limit: c('#3b82f6'),
     building: c('#a855f7'),
   }
   COL.phaseHighlight = {
     ascent: c('#4ade80'), cruise: c('#60a5fa'),
-    descent: c('#fbbf24'), height_limit: c('#f87171'),
+    descent: c('#fbbf24'), height_limit: c('#60a5fa'),
     building: c('#c084fc'),
   }
 }
@@ -1041,8 +1041,8 @@ function _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights = null) {
   const C = (hex) => Cesium.Color.fromCssColorString(hex)
   const phaseColors = {
     ascent: C('#22c55e'), cruise: C('#3b82f6'),
-    descent: C('#f59e0b'), height_limit: C('#ef4444'),
-    building: C('#a855f7'), no_fly: C('#ef4444'),
+    descent: C('#f59e0b'), height_limit: C('#3b82f6'),
+    building: C('#a855f7'), no_fly: C('#3b82f6'),
   }
   const hasProfile = altitudeProfile && altitudeProfile.length === pathPoints.length
 
@@ -1081,7 +1081,7 @@ function _drawPlanPathCore(pathPoints, altitudeProfile, terrainHeights = null) {
     const isAvoid = phase === 'building' || phase === 'no_fly'
     if (isAvoid) {
       // 规避段：更宽的外发光光晕，醒目区别于巡航段
-      const haloColor = phase === 'no_fly' ? '#ef4444' : '#a855f7'
+      const haloColor = phase === 'no_fly' ? '#3b82f6' : '#a855f7'
       planPathEntities.push(viewer.entities.add({
         polyline: { positions, width: 22, material: C(haloColor).withAlpha(0.22), clampToGround: false }
       }))

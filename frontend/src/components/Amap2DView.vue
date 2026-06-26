@@ -34,14 +34,14 @@ const PHASE_COLORS = {
   ascent: '#22c55e',
   cruise: '#3b82f6',
   descent: '#f59e0b',
-  height_limit: '#ef4444',
+  height_limit: '#3b82f6',
   building: '#a855f7',
 }
 const PHASE_COLORS_HIGHLIGHT = {
   ascent: '#4ade80',
   cruise: '#60a5fa',
   descent: '#fbbf24',
-  height_limit: '#f87171',
+  height_limit: '#60a5fa',
   building: '#c084fc',
 }
 
@@ -528,7 +528,7 @@ let planPathLines = []
 
 const PLAN_PHASE_COLORS = {
   ascent: '#22c55e', cruise: '#3b82f6', descent: '#f59e0b',
-  height_limit: '#ef4444', building: '#a855f7', no_fly: '#ef4444',
+  height_limit: '#3b82f6', building: '#a855f7', no_fly: '#3b82f6',
 }
 const PLAN_PHASE_LABELS = {
   ascent: '起飞爬升', cruise: '巡航', descent: '降落下降',

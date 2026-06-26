@@ -231,7 +231,7 @@ const PHASE_COLORS = {
   ascent: '#22c55e',
   cruise: '#3b82f6',
   descent: '#f59e0b',
-  height_limit: '#ef4444',
+  height_limit: '#3b82f6',
   building: '#a855f7',
 }
 

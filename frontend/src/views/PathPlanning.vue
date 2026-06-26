@@ -323,7 +323,7 @@ const PHASE_LEGEND = {
   cruise:     { color: '#3b82f6', label: '巡航段' },
   descent:    { color: '#f59e0b', label: '降落下降段' },
   building:   { color: '#a855f7', label: '建筑物避让段' },
-  height_limit: { color: '#ef4444', label: '限高区绕行段' },
+  height_limit: { color: '#3b82f6', label: '限高区绕行段' },
 }
 
 // ── 保存航线弹窗 ──────────────────────────────

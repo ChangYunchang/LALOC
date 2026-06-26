@@ -26,7 +26,7 @@
       <span>下降段</span>
     </div>
     <div class="legend-item">
-      <span class="legend-line" style="background: #ef4444;"></span>
+      <span class="legend-line" style="background: #3b82f6;"></span>
       <span>限高区飞行</span>
     </div>
     <div class="legend-item">
