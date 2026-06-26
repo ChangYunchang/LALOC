@@ -595,6 +595,12 @@ async function doPlan() {
     planResult.value = result
     drawRouteOnMap(result.path, result.altitude_profile)
     ElMessage.success('路径规划完成')
+    // 规划警告（限高区高度压低、绕行提示等）逐条弹出
+    if (result.warnings?.length) {
+      result.warnings.forEach(w => {
+        ElMessage({ message: w, type: 'warning', duration: 6000, showClose: true })
+      })
+    }
   } catch (e) {
     planProgress.value = null
     ElMessage.error('路径规划失败: ' + (e.message || '未知错误'))

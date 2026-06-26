@@ -3,6 +3,39 @@ import vue from '@vitejs/plugin-vue'
 import { resolve, join } from 'path'
 import { existsSync, readFileSync, statSync } from 'fs'
 
+// ── WGS-84 → GCJ-02 坐标转换（Mock 内部 zone 碰撞检测用）──────────────────
+// 禁飞区 GeoJSON 存储为 GCJ-02；路径规划的起终点在我们的坐标系中已统一为 WGS-84，
+// 因此在做 pointInPoly / distToPoly 前需先将 WGS-84 转换为 GCJ-02。
+const _MCK_PI = Math.PI
+const _MCK_A  = 6378245.0
+const _MCK_EE = 0.00669342162296594323
+function _mckOutCN(lng, lat) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
+}
+function _mckDLat(lng, lat) {
+  let r = -100 + 2*lng + 3*lat + 0.2*lat*lat + 0.1*lng*lat + 0.2*Math.sqrt(Math.abs(lng))
+  r += (20*Math.sin(6*lng*_MCK_PI) + 20*Math.sin(2*lng*_MCK_PI)) * 2/3
+  r += (20*Math.sin(lat*_MCK_PI)   + 40*Math.sin(lat/3*_MCK_PI)) * 2/3
+  r += (160*Math.sin(lat/12*_MCK_PI) + 320*Math.sin(lat*_MCK_PI/30)) * 2/3
+  return r
+}
+function _mckDLng(lng, lat) {
+  let r = 300 + lng + 2*lat + 0.1*lng*lng + 0.1*lng*lat + 0.1*Math.sqrt(Math.abs(lng))
+  r += (20*Math.sin(6*lng*_MCK_PI) + 20*Math.sin(2*lng*_MCK_PI)) * 2/3
+  r += (20*Math.sin(lng*_MCK_PI)   + 40*Math.sin(lng/3*_MCK_PI)) * 2/3
+  r += (150*Math.sin(lng/12*_MCK_PI) + 300*Math.sin(lng/30*_MCK_PI)) * 2/3
+  return r
+}
+function wgs2gcjMck(lng, lat) {
+  if (_mckOutCN(lng, lat)) return { lng, lat }
+  const radLat = lat / 180 * _MCK_PI
+  let magic = Math.sin(radLat); magic = 1 - _MCK_EE * magic * magic
+  const sq = Math.sqrt(magic)
+  const dlat = (_mckDLat(lng - 105, lat - 35) * 180) / ((_MCK_A * (1 - _MCK_EE)) / (magic * sq) * _MCK_PI)
+  const dlng = (_mckDLng(lng - 105, lat - 35) * 180) / (_MCK_A / sq * Math.cos(radLat) * _MCK_PI)
+  return { lng: lng + dlng, lat: lat + dlat }
+}
+
 // ── Mock API 数据（无需启动后端即可预览）─────────────────────────────────────
 const MOCK_WEATHER = {
   city: '广州', temperature: '28', humidity: '72',
@@ -123,6 +156,24 @@ function buildNoFlyPolys(geojson) {
 }
 const NO_FLY_POLYS = buildNoFlyPolys(MOCK_NO_FLY_ZONES)
 
+// 把 GeoJSON 限高区解析为多边形数组（附带 maxAlt、name 字段）
+function buildHeightLimitPolys(geojson) {
+  const polys = []
+  for (const f of (geojson.features || [])) {
+    const g = f.geometry; if (!g) continue
+    const maxAlt = f.properties?.max_altitude ?? 120
+    const name   = f.properties?.name || '限高区'
+    const rings = g.type === 'Polygon' ? [g.coordinates[0]]
+      : g.type === 'MultiPolygon' ? g.coordinates.map(c => c[0]) : []
+    for (const ring of rings) {
+      const pts = ring.map(c => ({ lng: c[0], lat: c[1] }))
+      if (pts.length >= 3) polys.push({ ...polyMeta(pts), maxAlt, name })
+    }
+  }
+  return polys
+}
+const HEIGHT_LIMIT_POLYS = buildHeightLimitPolys(MOCK_HEIGHT_LIMIT_ZONES)
+
 // 点在多边形内（射线法）
 function pointInPoly(lng, lat, poly) {
   const p = poly.pts; let inside = false
@@ -183,15 +234,17 @@ const BUILD_OVERFLY = 20  // 可越顶的最大建筑高度（米）
 function mockPlanPath(params) {
   const {
     start, end, waypoints = [], drone_speed = 15,
-    avoid_buildings = true, avoid_no_fly = true, suggested_alt = 120,
+    avoid_buildings = true, avoid_no_fly = true, avoid_height_limit = true,
+    cruise_alt = 120,
   } = params
   if (!start || !end) {
     return { is_feasible: false, warnings: ['缺少起终点'], path: [], altitude_profile: [], total_distance: 0, estimated_time: 0 }
   }
 
-  const CEIL = Math.max(Math.min(suggested_alt, 300), 30)  // 强制飞行限高
-  const doNoFly = avoid_no_fly !== false
-  const doBuild = avoid_buildings !== false
+  const CEIL = Math.max(Math.min(cruise_alt, 300), 30)  // 用户请求巡航高度
+  const doNoFly      = avoid_no_fly !== false
+  const doBuild      = avoid_buildings !== false
+  const doHeightLim  = avoid_height_limit !== false
   const ctrlPts = [start, ...waypoints, end]
 
   // ── 0. 起点/途经点/终点落在禁飞区内 → 拒绝规划（任何一点都不行）─
@@ -199,9 +252,10 @@ function mockPlanPath(params) {
     const labelOf = (i) => i === 0 ? '起点' : i === ctrlPts.length - 1 ? '终点' : `途经点${i}`
     const blocked_points = []
     ctrlPts.forEach((p, i) => {
+      const gcjP = wgs2gcjMck(p.lng, p.lat)
       for (const poly of NO_FLY_POLYS) {
-        if (p.lng < poly.minLng || p.lng > poly.maxLng || p.lat < poly.minLat || p.lat > poly.maxLat) continue
-        if (pointInPoly(p.lng, p.lat, poly)) {
+        if (gcjP.lng < poly.minLng || gcjP.lng > poly.maxLng || gcjP.lat < poly.minLat || gcjP.lat > poly.maxLat) continue
+        if (pointInPoly(gcjP.lng, gcjP.lat, poly)) {
           blocked_points.push({ index: i, label: labelOf(i), lng: p.lng, lat: p.lat })
           break
         }
@@ -250,12 +304,14 @@ function mockPlanPath(params) {
     const cached = blockCache.get(key)
     if (cached !== undefined) return cached
     const { lng, lat } = cellCenter(r, c)
+    // 禁飞区 GeoJSON 为 GCJ-02，需将 WGS-84 网格中心转换后再做碰撞检测
+    const gcj = wgs2gcjMck(lng, lat)
     let kind = null
     if (doNoFly) {
       for (const poly of NO_FLY_POLYS) {
-        if (lng < poly.minLng - 0.02 || lng > poly.maxLng + 0.02 ||
-            lat < poly.minLat - 0.02 || lat > poly.maxLat + 0.02) continue
-        if (pointInPoly(lng, lat, poly) || distToPoly(lng, lat, poly) < NF_MARGIN) { kind = 'no_fly'; break }
+        if (gcj.lng < poly.minLng - 0.02 || gcj.lng > poly.maxLng + 0.02 ||
+            gcj.lat < poly.minLat - 0.02 || gcj.lat > poly.maxLat + 0.02) continue
+        if (pointInPoly(gcj.lng, gcj.lat, poly) || distToPoly(gcj.lng, gcj.lat, poly) < NF_MARGIN) { kind = 'no_fly'; break }
       }
     }
     // 建筑：高于"可越顶高度"即视为障碍 → 水平绕行（仅极低矮建筑可越顶）
@@ -312,13 +368,15 @@ function mockPlanPath(params) {
   }
 
   // 视线串拉（string-pulling）：消除栅格 A* 的 45°/90° 阶梯锯齿。
-  // 从当前点尽量直连最远的后续点，只要直线不穿障碍就跳过中间台阶点，得到任意角度直线。
+  // 从当前点尽量直连最远的后续点，只要直线不穿障碍就跳过中间台阶点。
   //
-  // 注意：A* 用 blockKind（含 NF_MARGIN=150m 缓冲带）保证路径远离禁飞区，
-  // 但 lineClear 若也使用完整缓冲带，则任何穿越缓冲带的"抄近路"都会被拒绝，
-  // 导致串拉对禁飞区绕行路径完全失效，剩下密集阶梯折线 → Chaikin 柔滑后形成剧烈 45° 震荡。
-  // 修复：串拉只检查真实障碍（建筑高度 + 禁飞多边形内部），不再包含缓冲带，
-  // A* 已建立的安全间距不需要在串拉阶段重复强制。
+  // 禁飞区检测使用「内部 + 50m 薄缓冲」而非完整 NF_MARGIN（150m）：
+  //   · 若使用 0m 缓冲：串拉允许路径贴近区域边缘 → 掠边 → 后续 LOS 全被实体区域阻断
+  //     → 阶梯残留 → Chaikin 产生锐角震荡。
+  //   · 若使用完整 150m：凸形区域的所有边界点之间的直线都穿入缓冲带 → 串拉完全失效
+  //     → 原始阶梯直接交给 Chaikin → 同样产生严重震荡。
+  //   · 50m 薄缓冲：阻止贴边捷径，同时允许沿缓冲外沿的合理跳跃，两全其美。
+  const LC_NF_MARGIN = 50  // 串拉阶段的最小禁飞区间距（米）
   const lineClear = (a, b) => {
     const d = haversine(a, b)
     const steps = Math.max(1, Math.ceil(d / (cellM * 0.5)))
@@ -326,13 +384,15 @@ function mockPlanPath(params) {
       const t = s / steps
       const lng = a.lng + (b.lng - a.lng) * t
       const lat = a.lat + (b.lat - a.lat) * t
-      // 建筑障碍：按实际坐标高度判定
+      // 建筑障碍：WGS-84 坐标，直接判定
       if (doBuild && getBuildingHeight(lng, lat) > BUILD_OVERFLY) return false
-      // 禁飞区：只检查多边形内部（不含缓冲带），允许直线穿越缓冲带外圈
+      // 禁飞区：GeoJSON 为 GCJ-02，转换后同时检测内部 + 50m 薄缓冲
       if (doNoFly) {
+        const gcjPt = wgs2gcjMck(lng, lat)
         for (const poly of NO_FLY_POLYS) {
-          if (lng < poly.minLng || lng > poly.maxLng || lat < poly.minLat || lat > poly.maxLat) continue
-          if (pointInPoly(lng, lat, poly)) return false
+          if (gcjPt.lng < poly.minLng - 0.001 || gcjPt.lng > poly.maxLng + 0.001 ||
+              gcjPt.lat < poly.minLat - 0.001 || gcjPt.lat > poly.maxLat + 0.001) continue
+          if (pointInPoly(gcjPt.lng, gcjPt.lat, poly) || distToPoly(gcjPt.lng, gcjPt.lat, poly) < LC_NF_MARGIN) return false
         }
       }
     }
@@ -410,24 +470,26 @@ function mockPlanPath(params) {
     out.push(pts[pts.length - 1])
     return out
   }
-  let dense = resampleM(chaikin(poly, 3), SAMPLE_M)
+  let dense = resampleM(chaikin(poly, 5), SAMPLE_M)
   dense[0] = { lng: start.lng, lat: start.lat }
   dense[dense.length - 1] = { lng: end.lng, lat: end.lat }
 
-  // 兜底：极少数点若仍落在障碍格内，沿质心反方向小步推出（步长受限，不产生尖刺）
+  // 兜底：极少数点若仍落在障碍格内，沿质心反方向小步推出。
+  // 使用快照（snapDense）做前后邻居基准：避免已推离的相邻点影响方向计算，
+  // 防止多点连续推离时递推放大产生交替震荡。
+  const snapDense = dense.map(p => ({ ...p }))
   for (let i = 1; i < dense.length - 1; i++) {
     const cell = toCell(dense[i])
-    let k = blockKind(cell.r, cell.c)
-    if (!k) continue
+    if (!blockKind(cell.r, cell.c)) continue
     let p = dense[i]
     const ml = mPerDegLng(p.lat)
-    const prev = dense[i - 1], next = dense[i + 1]
-    // 推离方向：远离前后点连线中点（即弯道外侧）
+    const prev = snapDense[i - 1], next = snapDense[i + 1]
+    // 推离方向：远离前后原始点连线中点（弯道外侧）
     let nx = p.lng - (prev.lng + next.lng) / 2, ny = p.lat - (prev.lat + next.lat) / 2
     const L = Math.hypot(nx * ml, ny * MPD) || 1
     nx = (nx * ml) / L; ny = (ny * MPD) / L
-    for (let s = 1; s <= 4 && blockKind(toCell(p).r, toCell(p).c); s++) {
-      p = { lng: p.lng + nx * (cellM * 0.6) / ml, lat: p.lat + ny * (cellM * 0.6) / MPD }
+    for (let s = 1; s <= 6 && blockKind(toCell(p).r, toCell(p).c); s++) {
+      p = { lng: p.lng + nx * (cellM * 0.5) / ml, lat: p.lat + ny * (cellM * 0.5) / MPD }
     }
     dense[i] = p
   }
@@ -444,11 +506,24 @@ function mockPlanPath(params) {
     else { alt = CEIL; phase = 'cruise' }
 
     if (phase === 'cruise') {
-      // 贴近禁飞区缓冲 → 红色绕行段
-      if (doNoFly) {
+      // 限高区：在区域内时将高度压低至 maxAlt（路径点 WGS-84 → GCJ-02 后与区域比较）
+      if (doHeightLim && HEIGHT_LIMIT_POLYS.length) {
+        const gcjP = wgs2gcjMck(p.lng, p.lat)
+        for (const o of HEIGHT_LIMIT_POLYS) {
+          if (gcjP.lng < o.minLng || gcjP.lng > o.maxLng || gcjP.lat < o.minLat || gcjP.lat > o.maxLat) continue
+          if (pointInPoly(gcjP.lng, gcjP.lat, o)) {
+            alt   = Math.min(alt, o.maxAlt)
+            phase = 'height_limit'
+            break
+          }
+        }
+      }
+      // 贴近禁飞区缓冲 → 红色绕行段（路径点为 WGS-84，需转 GCJ-02 后与区域比较）
+      if (phase === 'cruise' && doNoFly) {
+        const gcjP = wgs2gcjMck(p.lng, p.lat)
         for (const o of NO_FLY_POLYS) {
-          if (p.lng < o.minLng - 0.02 || p.lng > o.maxLng + 0.02 || p.lat < o.minLat - 0.02 || p.lat > o.maxLat + 0.02) continue
-          if (distToPoly(p.lng, p.lat, o) < NF_MARGIN * 1.8) { phase = 'no_fly'; nearNoFly = true; break }
+          if (gcjP.lng < o.minLng - 0.02 || gcjP.lng > o.maxLng + 0.02 || gcjP.lat < o.minLat - 0.02 || gcjP.lat > o.maxLat + 0.02) continue
+          if (distToPoly(gcjP.lng, gcjP.lat, o) < NF_MARGIN * 1.8) { phase = 'no_fly'; nearNoFly = true; break }
         }
       }
       // 正在贴着建筑群绕行 → 紫色段（航线本身已避开建筑格，故检测附近是否有建筑）
@@ -472,6 +547,23 @@ function mockPlanPath(params) {
   for (let i = 0; i < dense.length - 1; i++) total_distance += haversine(dense[i], dense[i + 1])
   total_distance = Math.round(total_distance)
   const estimated_time = Math.round(total_distance / (drone_speed * 1000 / 3600))
+
+  // 限高区提示：找出路径经过的所有限高区，若用户设置高度超出限高则提醒
+  if (doHeightLim && HEIGHT_LIMIT_POLYS.length) {
+    const hitZones = new Map()  // name → maxAlt（去重）
+    for (const pp of dense) {
+      const gcjP = wgs2gcjMck(pp.lng, pp.lat)
+      for (const o of HEIGHT_LIMIT_POLYS) {
+        if (gcjP.lng < o.minLng || gcjP.lng > o.maxLng || gcjP.lat < o.minLat || gcjP.lat > o.maxLat) continue
+        if (pointInPoly(gcjP.lng, gcjP.lat, o) && CEIL > o.maxAlt) {
+          if (!hitZones.has(o.name) || hitZones.get(o.name) > o.maxAlt) hitZones.set(o.name, o.maxAlt)
+        }
+      }
+    }
+    for (const [name, maxAlt] of hitZones) {
+      warnings.push(`航线经过限高区「${name}」，最大飞行高度限制为 ${maxAlt}m（您设置的巡航高度 ${CEIL}m 已自动压低）`)
+    }
+  }
 
   if (nearNoFly) warnings.push('已水平绕行禁飞区（保持安全缓冲距离）')
   if (nearBuilding) warnings.push(`已水平绕行建筑群（仅 ${BUILD_OVERFLY}m 以下矮建筑越顶飞越，巡航限高 ${CEIL}m）`)

@@ -8,6 +8,7 @@
 import { onMounted, onUnmounted, ref, watch, nextTick } from 'vue'
 import { useMapStore } from '@/stores/map'
 import { useZoneStore } from '@/stores/zones'
+import { gcj2wgs } from '@/utils/coordConvert'
 
 const props = defineProps({
   showRoutes: { type: Boolean, default: true },
@@ -387,11 +388,15 @@ function drawRoutes(routes) {
   routes.forEach((route) => {
     if (!route.route_line?.coordinates) return
 
-    const coords = route.route_line.coordinates
+    const rawCoords = route.route_line.coordinates
+    // crs='wgs84' 是系统规划航线；无 crs 的示例/旧航线坐标为 GCJ-02，需转 WGS-84 再给 Cesium
+    const coords = route.crs === 'wgs84'
+      ? rawCoords
+      : rawCoords.map(c => { const w = gcj2wgs(c[0], c[1]); return [w.lng, w.lat] })
     const altProfile = route.altitude_profile
     const n = coords.length
 
-    // 1. Catmull-Rom 平滑曲线（含起降弧），密集采样点
+    // 1. 逐点转 Cartesian3（coords 已统一为 WGS-84）
     let curvedPositions = generateSmoothCurvePositions(coords, altProfile)
 
     const makeDepthFail = (color) =>
