@@ -411,15 +411,42 @@ function mockPlanPath(params) {
   }
 
   // ── 3. 逐段规划：每段独立 A*+串拉，再按途经点拼接（务必经过每个途经点）─
+  //
+  // 若起/终点在 NF_MARGIN 缓冲带内（但在区外），其栅格格子会被 blockKind 标为 no_fly，
+  // 导致 8 个邻格全被封锁，A* 无法扩展而失败。
+  // 解决：BFS 向外找最近的无障碍格作为 A* 的实际出发/到达格，
+  // 最终路径首尾仍对齐到精确控制点，不改变用户设定位置。
+  function findEscapeCell(cell) {
+    if (!blockKind(cell.r, cell.c)) return cell  // 本身就安全
+    const queue = [cell]
+    const seen = new Set(); seen.add(cell.r * cols + cell.c)
+    for (let qi = 0; qi < queue.length; qi++) {
+      const { r, c } = queue[qi]
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        if (!dr && !dc) continue
+        const nr = r + dr, nc = c + dc
+        if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue
+        const key = nr * cols + nc
+        if (seen.has(key)) continue
+        seen.add(key)
+        if (!blockKind(nr, nc)) return { r: nr, c: nc }  // 找到安全格
+        queue.push({ r: nr, c: nc })
+      }
+    }
+    return cell  // 无法逃脱（整个网格都被封锁，极端情形）
+  }
+
   const warnings = []
   let isFeasible = true
   let poly = []
   for (let s = 0; s < ctrlPts.length - 1; s++) {
-    const seg = astarSeg(toCell(ctrlPts[s]), toCell(ctrlPts[s + 1]))
+    const safeS = findEscapeCell(toCell(ctrlPts[s]))
+    const safeE = findEscapeCell(toCell(ctrlPts[s + 1]))
+    const seg = astarSeg(safeS, safeE)
     let segPts
     if (!seg) {
       isFeasible = false
-      warnings.push(`路径段 ${s + 1} 无法绕过障碍（可能被禁飞区封闭）`)
+      warnings.push(`路径段 ${s + 1} 无法绕过障碍（可能被禁飞区完全封闭）`)
       segPts = [ctrlPts[s], ctrlPts[s + 1]]
     } else {
       segPts = seg.map(({ r, c }) => cellCenter(r, c))
@@ -474,23 +501,50 @@ function mockPlanPath(params) {
   dense[0] = { lng: start.lng, lat: start.lat }
   dense[dense.length - 1] = { lng: end.lng, lat: end.lat }
 
-  // 兜底：极少数点若仍落在障碍格内，沿质心反方向小步推出。
-  // 使用快照（snapDense）做前后邻居基准：避免已推离的相邻点影响方向计算，
-  // 防止多点连续推离时递推放大产生交替震荡。
+  // 兜底：Chaikin 平滑后角点可能贴近甚至进入禁飞区边界。
+  // 建筑：继续用栅格判定 + 邻点中点方向推离（建筑无精确几何）。
+  // 禁飞区：改用实际多边形几何（pointInPoly / distToPoly）：
+  //   · 栅格格子中心可能落在区域外 → 漏判；
+  //   · 旧的"邻点中点"方向对绕角路径可能指向区域内部 → 越推越深。
+  //   正确方向：从质心指向当前点（内部和边缘点均指向外侧）。
   const snapDense = dense.map(p => ({ ...p }))
+  const POST_CLEAR_M = 30  // 平滑后要求的最小禁飞区物理间距（米）
   for (let i = 1; i < dense.length - 1; i++) {
-    const cell = toCell(dense[i])
-    if (!blockKind(cell.r, cell.c)) continue
     let p = dense[i]
     const ml = mPerDegLng(p.lat)
-    const prev = snapDense[i - 1], next = snapDense[i + 1]
-    // 推离方向：远离前后原始点连线中点（弯道外侧）
-    let nx = p.lng - (prev.lng + next.lng) / 2, ny = p.lat - (prev.lat + next.lat) / 2
-    const L = Math.hypot(nx * ml, ny * MPD) || 1
-    nx = (nx * ml) / L; ny = (ny * MPD) / L
-    for (let s = 1; s <= 6 && blockKind(toCell(p).r, toCell(p).c); s++) {
-      p = { lng: p.lng + nx * (cellM * 0.5) / ml, lat: p.lat + ny * (cellM * 0.5) / MPD }
+
+    // ① 建筑推离（栅格判定，邻点中点方向）
+    if (doBuild && blockKind(toCell(p).r, toCell(p).c) === 'building') {
+      const prev = snapDense[i - 1], next = snapDense[i + 1]
+      let nx = p.lng - (prev.lng + next.lng) / 2, ny = p.lat - (prev.lat + next.lat) / 2
+      const L = Math.hypot(nx * ml, ny * MPD) || 1
+      nx = (nx * ml) / L; ny = (ny * MPD) / L
+      for (let s = 1; s <= 6 && blockKind(toCell(p).r, toCell(p).c) === 'building'; s++) {
+        p = { lng: p.lng + nx * (cellM * 0.5) / ml, lat: p.lat + ny * (cellM * 0.5) / MPD }
+      }
     }
+
+    // ② 禁飞区推离（实际多边形几何，最多迭代 10 次）
+    if (doNoFly && NO_FLY_POLYS.length) {
+      let gcjP = wgs2gcjMck(p.lng, p.lat)
+      for (let attempt = 0; attempt < 10; attempt++) {
+        let badPoly = null
+        for (const poly of NO_FLY_POLYS) {
+          if (gcjP.lng < poly.minLng - 0.005 || gcjP.lng > poly.maxLng + 0.005 ||
+              gcjP.lat < poly.minLat - 0.005 || gcjP.lat > poly.maxLat + 0.005) continue
+          if (pointInPoly(gcjP.lng, gcjP.lat, poly) ||
+              distToPoly(gcjP.lng, gcjP.lat, poly) < POST_CLEAR_M) { badPoly = poly; break }
+        }
+        if (!badPoly) break
+        // 推力方向：从质心指向当前点（内部和边缘点均向外推）
+        let nx = gcjP.lng - badPoly.cx, ny = gcjP.lat - badPoly.cy
+        const L = Math.hypot(nx * ml, ny * MPD) || 1
+        nx = (nx * ml) / L; ny = (ny * MPD) / L
+        p = { lng: p.lng + nx * 30 / ml, lat: p.lat + ny * 30 / MPD }
+        gcjP = wgs2gcjMck(p.lng, p.lat)
+      }
+    }
+
     dense[i] = p
   }
   const n = dense.length
