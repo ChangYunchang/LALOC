@@ -28,6 +28,8 @@ class RouteResponse(BaseModel):
     total_distance: Optional[float]
     estimated_time: Optional[float]
     status: str
+    crs: Optional[str] = None  # 坐标系标识："wgs84" 表示 WGS-84（SRID 4326）
+    altitude_profile: Optional[list] = None  # 高度剖面 [{alt, phase}, ...]
     created_at: datetime
 
     class Config:

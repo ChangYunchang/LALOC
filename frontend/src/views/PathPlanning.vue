@@ -153,15 +153,15 @@
         </div>
 
         <div class="param-item"><el-checkbox v-model="avoidNoFly">避开禁飞区</el-checkbox></div>
-        <div class="param-item"><el-checkbox v-model="avoidHeightLimit">避开限高区</el-checkbox></div>
+        <div class="param-item"><el-checkbox v-model="avoidHeightLimit">考虑限高区的最大高度</el-checkbox></div>
 
         <!-- 选点规划专属：建筑物避让 -->
         <template v-if="planningMode === 'points'">
           <div class="param-item"><el-checkbox v-model="avoidBuildings">避开建筑物</el-checkbox></div>
           <div v-if="avoidBuildings" class="param-item param-item--indent">
             <div class="param-label-row">
-              <span>强制飞行限高</span>
-              <span class="param-hint">低于限高的建筑从上方飞越；高于限高的建筑群强制水平绕行（不会超过此高度）</span>
+              <span>建议飞行高度</span>
+              <span class="param-hint">规划航线的巡航高度，限高区内自动压低；飞行中可手动调整</span>
             </div>
             <div class="slider-row">
               <el-slider v-model="suggestedAlt" :min="50" :max="250" :step="10" show-input input-size="small" />
@@ -297,7 +297,7 @@ const generatedWaypoints = ref(null)
 // ── 参数 ──────────────────────────────────────
 const droneSpeed = ref(15)
 const terrainAgl = ref(80)        // 巡逻模式离地飞行高度
-const suggestedAlt = ref(120)     // 选点模式强制飞行限高
+const suggestedAlt = ref(120)     // 选点模式建议飞行高度
 const avoidNoFly = ref(true)
 const avoidHeightLimit = ref(true)
 const avoidBuildings = ref(true)
@@ -466,8 +466,40 @@ function parseCoords(input) {
   return parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) ? { lng: parts[0], lat: parts[1] } : null
 }
 
-function geocodeStart() { const c = parseCoords(startInput.value); if (c) startPoint.value = c }
-function geocodeEnd() { const c = parseCoords(endInput.value); if (c) endPoint.value = c }
+async function geocodeStart() {
+  const c = parseCoords(startInput.value)
+  if (!c) return
+  startPoint.value = c
+  try {
+    const check = await checkPoint(c.lng, c.lat)
+    if (check.in_no_fly_zone) {
+      ElMessage.error('该位置在禁飞区内，无法选点')
+      startPoint.value = null; startInput.value = ''
+      return
+    }
+    if (check.height_limits?.length > 0) {
+      const limits = check.height_limits.map(l => l.max_altitude ? `${l.max_altitude}m` : l.name).join(', ')
+      ElMessage.warning(`起点位于限高区内 (${limits})，请谨慎设置巡航高度`)
+    }
+  } catch { /* API 失败时静默降级 */ }
+}
+async function geocodeEnd() {
+  const c = parseCoords(endInput.value)
+  if (!c) return
+  endPoint.value = c
+  try {
+    const check = await checkPoint(c.lng, c.lat)
+    if (check.in_no_fly_zone) {
+      ElMessage.error('该位置在禁飞区内，无法选点')
+      endPoint.value = null; endInput.value = ''
+      return
+    }
+    if (check.height_limits?.length > 0) {
+      const limits = check.height_limits.map(l => l.max_altitude ? `${l.max_altitude}m` : l.name).join(', ')
+      ElMessage.warning(`终点位于限高区内 (${limits})，请谨慎设置巡航高度`)
+    }
+  } catch { /* API 失败时静默降级 */ }
+}
 function addWaypoint() { waypoints.value.push({ input: '' }) }
 function removeWaypoint(i) { waypoints.value.splice(i, 1) }
 
@@ -563,6 +595,55 @@ async function doPlan() {
     start = { lng: pts[0].lng, lat: pts[0].lat, alt: terrainAgl.value }
     end = { lng: pts[pts.length - 1].lng, lat: pts[pts.length - 1].lat, alt: terrainAgl.value }
     waypointsList = pts.slice(1, -1).map(p => ({ lng: p.lng, lat: p.lat, alt: terrainAgl.value }))
+  }
+
+  // ── 规划前限高区高度检查 ──────────────────────
+  const cruiseAlt = planningMode.value === 'points' ? suggestedAlt.value : terrainAgl.value
+  const pointsToCheck = [start]
+  if (waypointsList.length > 0) {
+    // 巡逻模式大量航点时采样检查，避免过多 API 请求
+    const sampleStep = waypointsList.length > 20 ? 5 : 1
+    for (let i = 0; i < waypointsList.length; i += sampleStep) {
+      pointsToCheck.push(waypointsList[i])
+    }
+  }
+  pointsToCheck.push(end)
+
+  try {
+    const checks = await Promise.allSettled(
+      pointsToCheck.map(p => checkPoint(p.lng, p.lat))
+    )
+    const warnings = []
+    checks.forEach((result, i) => {
+      if (result.status === 'fulfilled' && result.value?.height_limits?.length > 0) {
+        const pt = pointsToCheck[i]
+        const label = i === 0 ? '起点' : i === pointsToCheck.length - 1 ? '终点' : `途经点${i}`
+        result.value.height_limits.forEach(zone => {
+          if (cruiseAlt > zone.max_altitude) {
+            warnings.push({
+              label, lng: pt.lng.toFixed(4), lat: pt.lat.toFixed(4),
+              zoneName: zone.name || '未命名限高区', maxAlt: zone.max_altitude,
+            })
+          }
+        })
+      }
+    })
+    if (warnings.length > 0) {
+      const lines = warnings.map(w =>
+        `• ${w.label} (${w.lng}, ${w.lat}) 位于「${w.zoneName}」内，限高 ${w.maxAlt}m`
+      ).join('\n')
+      const minMaxAlt = Math.min(...warnings.map(w => w.maxAlt))
+      await ElMessageBox.alert(
+        `当前巡航高度 ${cruiseAlt}m 超过以下限高区限制：\n\n${lines}\n\n请将巡航高度调整至 ${minMaxAlt}m 以下后重新规划。`,
+        '限高区飞行提醒',
+        { confirmButtonText: '返回调整', type: 'warning' }
+      )
+      return  // 中止规划，强制用户返回调整高度
+    }
+  } catch (e) {
+    // 用户点击取消 → 中止规划
+    if (e === 'cancel' || e?.toString?.() === 'cancel') return
+    // API 失败时静默降级，不阻塞规划流程
   }
 
   planning.value = true

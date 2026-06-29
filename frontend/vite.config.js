@@ -630,12 +630,13 @@ function mockPlanPath(params) {
 function mockApiPlugin() {
   const MOCK_MAP = {
     'GET /api/weather/live': MOCK_WEATHER,
-    'GET /api/zones/no-fly': MOCK_NO_FLY_ZONES,
-    'GET /api/zones/height-limit': MOCK_HEIGHT_LIMIT_ZONES,
-    'GET /api/zones/stats': MOCK_ZONE_STATS,
-    'GET /api/routes/': MOCK_ROUTES,
-    'GET /api/routes': MOCK_ROUTES,
-    'GET /api/zones/check-point': { in_no_fly_zone: false, height_limits: [] },
+    // 以下已对接真实后端数据库，不再使用 mock，请求透传至后端
+    // 'GET /api/zones/no-fly': MOCK_NO_FLY_ZONES,
+    // 'GET /api/zones/height-limit': MOCK_HEIGHT_LIMIT_ZONES,
+    // 'GET /api/zones/stats': MOCK_ZONE_STATS,
+    // 'GET /api/routes/': MOCK_ROUTES,
+    // 'GET /api/routes': MOCK_ROUTES,
+    // 'GET /api/zones/check-point': { in_no_fly_zone: false, height_limits: [] },
   }
   return {
     name: 'mock-api',
@@ -736,6 +737,12 @@ export default defineConfig({
   server: {
     port: 5173,
     host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     rollupOptions: {

@@ -958,6 +958,11 @@ function drawBackgroundRoutes(routes) {
     const altProfile = route.altitude_profile
     const hasProfile = altProfile && altProfile.length === rawCoords.length
 
+    // crs='wgs84' 的航线需转 GCJ-02；样例/API 航线根据 crs 字段判断
+    const toMapCoord = route.crs === 'wgs84'
+      ? (c) => { const g = wgs2gcj(c[0], c[1]); return new AMap.LngLat(g.lng, g.lat) }
+      : (c) => new AMap.LngLat(c[0], c[1])
+
     if (hasProfile) {
       // 按相位分段，每段单独做 Chaikin 平滑后绘制
       const boundaries = [0]
@@ -969,7 +974,7 @@ function drawBackgroundRoutes(routes) {
         const endIdx = b < boundaries.length - 1 ? boundaries[b + 1] : rawCoords.length - 1
         const phase = altProfile[startIdx].phase
         const color = PHASE_COLORS[phase] || COLOR_NORMAL
-        const rawSeg = rawCoords.slice(startIdx, endIdx + 1).map(c => new AMap.LngLat(c[0], c[1]))
+        const rawSeg = rawCoords.slice(startIdx, endIdx + 1).map(toMapCoord)
         if (rawSeg.length < 2) continue
         const smoothSeg = rawSeg.length >= 4 ? _chaikin(rawSeg) : rawSeg
         const line = new AMap.Polyline({
@@ -981,7 +986,7 @@ function drawBackgroundRoutes(routes) {
         bgRouteLines.push(line)
       }
     } else {
-      const rawPts = rawCoords.map(c => new AMap.LngLat(c[0], c[1]))
+      const rawPts = rawCoords.map(toMapCoord)
       const smoothPts = rawPts.length >= 4 ? _chaikin(rawPts) : rawPts
       const line = new AMap.Polyline({
         path: smoothPts, strokeColor: COLOR_NORMAL,

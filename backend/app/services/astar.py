@@ -624,15 +624,8 @@ def compute_altitude_profile(
     landing_start = max(takeoff_end + 1, min(n - 2, n - int(n * landing_pct)))
 
     for i in range(n):
-        if i <= takeoff_end:
-            t = i / takeoff_end
-            alt = takeoff_alt + (cruise_alt - takeoff_alt) * t
-            phase = "ascent"
-        elif i >= landing_start:
-            t = (i - landing_start) / max(1, (n - 1 - landing_start))
-            alt = cruise_alt + (landing_alt - cruise_alt) * t
-            phase = "descent"
-        elif in_height_limit[i]:
+        # 限高区 & 建筑物优先级最高：即使起降段也必须遵守
+        if in_height_limit[i]:
             target_alt = min(cruise_alt, min_height_limit[i])
             alt = target_alt
             phase = "height_limit"
@@ -641,6 +634,14 @@ def compute_altitude_profile(
             target_alt = max(cruise_alt, building_height_at_point[i] + SAFETY)
             alt = target_alt
             phase = "building"
+        elif i <= takeoff_end:
+            t = i / takeoff_end
+            alt = takeoff_alt + (cruise_alt - takeoff_alt) * t
+            phase = "ascent"
+        elif i >= landing_start:
+            t = (i - landing_start) / max(1, (n - 1 - landing_start))
+            alt = cruise_alt + (landing_alt - cruise_alt) * t
+            phase = "descent"
         else:
             alt = cruise_alt
             phase = "cruise"

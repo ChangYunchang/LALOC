@@ -50,6 +50,7 @@ def get_all_routes(db: Session = Depends(get_db)):
             "total_distance": route.total_distance,
             "estimated_time": route.estimated_time,
             "status": route.status,
+            "crs": "wgs84",  # 数据库存储为 SRID 4326 (WGS-84)，前端据此做 GCJ-02 转换
             "altitude_profile": altitude_profile,
             "created_at": route.created_at.isoformat() if route.created_at else None,
         })
@@ -92,6 +93,7 @@ def get_route(route_id: int, db: Session = Depends(get_db)):
         "total_distance": route.total_distance,
         "estimated_time": route.estimated_time,
         "status": route.status,
+        "crs": "wgs84",  # 数据库存储为 SRID 4326 (WGS-84)，前端据此做 GCJ-02 转换
         "altitude_profile": altitude_profile,
         "created_at": route.created_at.isoformat() if route.created_at else None,
     }
