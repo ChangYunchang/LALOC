@@ -247,7 +247,9 @@ function renderZones() {
     zoneStore.noFlyZones.features.forEach((feature) => {
       if (!feature.geometry) return
       const coords = feature.geometry.coordinates[0]
-      const hierarchy = Cesium.Cartesian3.fromDegreesArray(coords.flatMap((c) => [c[0], c[1]]))
+      // 禁飞区数据为 GCJ-02，需转换为 WGS-84 才能在 Cesium 上正确显示
+      const wgsCoords = coords.map(c => { const w = gcj2wgs(c[0], c[1]); return [w.lng, w.lat] })
+      const hierarchy = Cesium.Cartesian3.fromDegreesArray(wgsCoords.flatMap((c) => [c[0], c[1]]))
       const entity = viewer.entities.add({
         polygon: {
           hierarchy,
@@ -268,7 +270,9 @@ function renderZones() {
     zoneStore.heightLimitZones.features.forEach((feature) => {
       if (!feature.geometry) return
       const coords = feature.geometry.coordinates[0]
-      const hierarchy = Cesium.Cartesian3.fromDegreesArray(coords.flatMap((c) => [c[0], c[1]]))
+      // 限高区数据为 GCJ-02，需转换为 WGS-84 才能在 Cesium 上正确显示
+      const wgsCoords = coords.map(c => { const w = gcj2wgs(c[0], c[1]); return [w.lng, w.lat] })
+      const hierarchy = Cesium.Cartesian3.fromDegreesArray(wgsCoords.flatMap((c) => [c[0], c[1]]))
       const entity = viewer.entities.add({
         polygon: {
           hierarchy,
@@ -760,7 +764,8 @@ function _buildNoFlyPolys() {
     const rings = g.type === 'Polygon' ? [g.coordinates[0]]
       : g.type === 'MultiPolygon' ? g.coordinates.map(c => c[0]) : []
     for (const ring of rings) {
-      const pts = ring.map(c => ({ lng: c[0], lat: c[1] }))
+      // 禁飞区数据为 GCJ-02，需转换为 WGS-84 才能在 Cesium 坐标系下正确做碰撞检测
+      const pts = ring.map(c => { const w = gcj2wgs(c[0], c[1]); return { lng: w.lng, lat: w.lat } })
       if (pts.length < 3) continue
       let mnL = Infinity, mxL = -Infinity, mnA = Infinity, mxA = -Infinity
       for (const p of pts) { mnL = Math.min(mnL, p.lng); mxL = Math.max(mxL, p.lng); mnA = Math.min(mnA, p.lat); mxA = Math.max(mxA, p.lat) }
